@@ -4,7 +4,6 @@ use crate::bsp::debug_viz::BspDebugger;
 use crate::editor::objects::Selection;
 
 use eframe::egui::{self, Context, Sense}; //Remove unused imports
-use eframe::epaint::{/*Color32, Vec2*/}; //Remove unused imports
 use log::{info, error};
 use std::sync::Arc;
 use parking_lot::RwLock;

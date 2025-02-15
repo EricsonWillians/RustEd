@@ -1,8 +1,7 @@
 // src/bsp/bsp_util.rs
 // Geometry and other helper functions specific to BSP.
 
-use crate::bsp::{Seg, SegmentSide, SegPosition, EPSILON}; // Import from the bsp module
-use crate::document::{LineDef, Vertex};
+use crate::bsp::{Seg, EPSILON}; // Import from the bsp module
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq)] // Add PartialEq

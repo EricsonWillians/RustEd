@@ -1,4 +1,4 @@
-use crate::bsp::{Line2D, Seg, SegPosition}; // Import Seg, Line2D, and SegPosition
+use crate::bsp::{Line2D, Seg}; 
 use std::sync::Arc;
 
 #[derive(Debug)]

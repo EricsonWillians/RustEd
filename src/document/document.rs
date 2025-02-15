@@ -4,7 +4,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use rayon::prelude::*;
 use std::io::{self, Read, Seek};
-use byteorder::{LE, ReadBytesExt, WriteBytesExt}; // Import WriteBytesExt
+use byteorder::{LE, ReadBytesExt}; 
 use std::str;
 
 #[derive(Debug, Clone, Copy)]
