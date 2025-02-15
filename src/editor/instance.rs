@@ -1,9 +1,12 @@
 // src/editor/instance.rs
-pub struct Instance;
+
+pub struct Instance {
+}
 
 impl Instance {
     pub fn new() -> Self {
-        Instance
+        Instance {
+        }
     }
     pub fn editor_init(&mut self) {
         // Stub initialization

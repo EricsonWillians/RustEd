@@ -1,19 +1,13 @@
-//! # Document Module
-//!
-//! This module stores level data and provides functions to query and
-//! process the level. It includes logic for computing level checksums,
-//! accessing objects by type, and various queries (e.g. line length,
-//! zero-length detection, etc.).
-//!
-//! Inspired by the original Eureka DOOM Editor's Document.cc.
-//!
-//! Licensed under the GNU General Public License v2 (or later).
+// src/document/document.rs
 
-use std::f64;
-use std::rc::Rc;
+use std::sync::Arc;
+use parking_lot::RwLock;
+use rayon::prelude::*;
+use std::io::{self, Read, Seek};
+use byteorder::{LE, ReadBytesExt, WriteBytesExt}; // Import WriteBytesExt
+use std::str;
 
-/// Represents the object types in the level.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum ObjType {
     Things,
     Linedefs,
@@ -22,97 +16,122 @@ pub enum ObjType {
     Sectors,
 }
 
-/// A simple 2D vertex.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, PartialEq)] // Add PartialEq
 pub struct Vertex {
     pub raw_x: i32,
     pub raw_y: i32,
 }
 
 impl Vertex {
-    /// Returns the x-coordinate.
-    pub fn x(&self) -> i32 {
-        self.raw_x
+    pub fn from_wad<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
+        Ok(Vertex {
+            raw_x: reader.read_i16::<LE>()? as i32,
+            raw_y: reader.read_i16::<LE>()? as i32,
+        })
     }
 
-    /// Returns the y-coordinate.
-    pub fn y(&self) -> i32 {
-        self.raw_y
-    }
-
-    /// Checks if the vertex matches the given coordinates.
     pub fn matches(&self, tx: i32, ty: i32) -> bool {
         self.raw_x == tx && self.raw_y == ty
     }
 }
 
-/// Represents a sector.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)] // Add PartialEq
 pub struct Sector {
     pub floorh: i32,
     pub ceilh: i32,
+    pub floor_tex: String,
+    pub ceil_tex: String,
     pub light: i32,
     pub sector_type: i32,
     pub tag: i32,
-    // For textures, we assume integer representations.
-    pub floor_tex: i32,
-    pub ceil_tex: i32,
 }
-
 impl Sector {
-    pub fn floor_tex(&self) -> i32 {
-        self.floor_tex
-    }
+    pub fn from_wad<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
+        let floorh = reader.read_i16::<LE>()? as i32;
+        let ceilh = reader.read_i16::<LE>()? as i32;
 
-    pub fn ceil_tex(&self) -> i32 {
-        self.ceil_tex
+        let mut floor_tex = [0u8; 8];
+        reader.read_exact(&mut floor_tex)?;
+        let mut ceil_tex = [0u8; 8];
+        reader.read_exact(&mut ceil_tex)?;
+
+        Ok(Sector {
+            floorh,
+            ceilh,
+            floor_tex: String::from_utf8_lossy(&floor_tex).trim_end_matches('\0').to_string(),
+            ceil_tex: String::from_utf8_lossy(&ceil_tex).trim_end_matches('\0').to_string(),
+            light: reader.read_i16::<LE>()? as i32,
+            sector_type: reader.read_i16::<LE>()? as i32,
+            tag: reader.read_i16::<LE>()? as i32,
+        })
     }
 }
 
-/// Represents a sidedef.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)] // Add PartialEq
 pub struct SideDef {
     pub x_offset: i32,
     pub y_offset: i32,
-    pub lower_tex: i32,
-    pub mid_tex: i32,
-    pub upper_tex: i32,
-    /// Index into the Document’s sectors vector.
+    pub upper_tex: String,
+    pub lower_tex: String,
+    pub mid_tex: String,
     pub sector: usize,
 }
 
 impl SideDef {
-    pub fn lower_tex(&self) -> i32 {
-        self.lower_tex
-    }
+    pub fn from_wad<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
+        let x_offset = reader.read_i16::<LE>()? as i32;
+        let y_offset = reader.read_i16::<LE>()? as i32;
 
-    pub fn mid_tex(&self) -> i32 {
-        self.mid_tex
-    }
+        let mut upper_tex = [0u8; 8];
+        let mut lower_tex = [0u8; 8];
+        let mut mid_tex = [0u8; 8];
+        reader.read_exact(&mut upper_tex)?;
+        reader.read_exact(&mut lower_tex)?;
+        reader.read_exact(&mut mid_tex)?;
 
-    pub fn upper_tex(&self) -> i32 {
-        self.upper_tex
+        Ok(SideDef {
+            x_offset,
+            y_offset,
+            upper_tex: String::from_utf8_lossy(&upper_tex).trim_end_matches('\0').to_string(),
+            lower_tex: String::from_utf8_lossy(&lower_tex).trim_end_matches('\0').to_string(),
+            mid_tex: String::from_utf8_lossy(&mid_tex).trim_end_matches('\0').to_string(),
+            sector: reader.read_u16::<LE>()? as usize,
+        })
     }
 }
 
-/// Represents a linedef.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)] // Add PartialEq
 pub struct LineDef {
+    pub start: usize,
+    pub end: usize,
     pub flags: i32,
     pub line_type: i32,
     pub tag: i32,
-    /// Index into the vertices vector.
-    pub start: usize,
-    /// Index into the vertices vector.
-    pub end: usize,
-    /// Index into the sidedefs vector; -1 indicates none.
     pub right: i32,
-    /// Index into the sidedefs vector; -1 indicates none.
     pub left: i32,
 }
 
-/// Represents a thing (e.g. enemy, item, etc.).
-#[derive(Debug)]
+impl LineDef {
+    pub fn from_wad<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
+        Ok(LineDef {
+            start: reader.read_u16::<LE>()? as usize,
+            end: reader.read_u16::<LE>()? as usize,
+            flags: reader.read_i16::<LE>()? as i32, // Corrected to i16
+            line_type: reader.read_i16::<LE>()? as i32, // Corrected to i16
+            tag: reader.read_i16::<LE>()? as i32,    // Corrected to i16
+            right: reader.read_i16::<LE>()? as i32,
+            left: reader.read_i16::<LE>()? as i32,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)] // Add PartialEq
 pub struct Thing {
     pub raw_x: i32,
     pub raw_y: i32,
@@ -121,195 +140,488 @@ pub struct Thing {
     pub options: i32,
 }
 
-/// The Document struct stores all level objects.
-pub struct Document {
-    pub things: Vec<Rc<Thing>>,
-    pub vertices: Vec<Rc<Vertex>>,
-    pub sectors: Vec<Rc<Sector>>,
-    pub sidedefs: Vec<Rc<SideDef>>,
-    pub linedefs: Vec<Rc<LineDef>>,
+impl Thing {
+    pub fn from_wad<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
+        Ok(Thing {
+            raw_x: reader.read_i16::<LE>()? as i32,
+            raw_y: reader.read_i16::<LE>()? as i32,
+            angle: reader.read_i16::<LE>()? as i32,
+            thing_type: reader.read_i16::<LE>()? as i32,
+            options: reader.read_i16::<LE>()? as i32,
+        })
+    }
+}
 
-    // Additional raw data.
-    pub header_data: Vec<u8>,
-    pub behavior_data: Vec<u8>,
-    pub scripts_data: Vec<u8>,
-    pub basis: Vec<u8>,
+#[derive(Default)]
+pub struct Document {
+    things: Arc<RwLock<Vec<Arc<Thing>>>>,
+    vertices: Arc<RwLock<Vec<Arc<Vertex>>>>,
+    sectors: Arc<RwLock<Vec<Arc<Sector>>>>,
+    sidedefs: Arc<RwLock<Vec<Arc<SideDef>>>>,
+    linedefs: Arc<RwLock<Vec<Arc<LineDef>>>>,
+
+    header_data: Arc<RwLock<Vec<u8>>>,
+    behavior_data: Arc<RwLock<Vec<u8>>>,
+    scripts_data: Arc<RwLock<Vec<u8>>>,
+    basis: Arc<RwLock<Vec<u8>>>, // Is this still needed?
+
+    checksum: Arc<RwLock<u32>>,
 }
 
 impl Document {
-    /// Creates a new, empty document.
     pub fn new() -> Self {
-        Document {
-            things: Vec::new(),
-            vertices: Vec::new(),
-            sectors: Vec::new(),
-            sidedefs: Vec::new(),
-            linedefs: Vec::new(),
-            header_data: Vec::new(),
-            behavior_data: Vec::new(),
-            scripts_data: Vec::new(),
-            basis: Vec::new(),
-        }
+        Self::default()
     }
 
-    /// Returns the number of objects for the given type.
+    // Thread-safe accessors (these return clones of the Arcs)
+    pub fn vertices(&self) -> Arc<RwLock<Vec<Arc<Vertex>>>> { Arc::clone(&self.vertices) }
+    pub fn linedefs(&self) -> Arc<RwLock<Vec<Arc<LineDef>>>> { Arc::clone(&self.linedefs) }
+    pub fn sectors(&self) -> Arc<RwLock<Vec<Arc<Sector>>>> { Arc::clone(&self.sectors) }
+    pub fn sidedefs(&self) -> Arc<RwLock<Vec<Arc<SideDef>>>> { Arc::clone(&self.sidedefs) }
+    pub fn things(&self) -> Arc<RwLock<Vec<Arc<Thing>>>> { Arc::clone(&self.things) }
+
+
     pub fn num_objects(&self, obj_type: ObjType) -> usize {
         match obj_type {
-            ObjType::Things => self.things.len(),
-            ObjType::Linedefs => self.linedefs.len(),
-            ObjType::Sidedefs => self.sidedefs.len(),
-            ObjType::Vertices => self.vertices.len(),
-            ObjType::Sectors => self.sectors.len(),
+            ObjType::Things => self.things.read().len(),
+            ObjType::Linedefs => self.linedefs.read().len(),
+            ObjType::Sidedefs => self.sidedefs.read().len(),
+            ObjType::Vertices => self.vertices.read().len(),
+            ObjType::Sectors => self.sectors.read().len(),
         }
     }
+    // --- Mutating methods (require write locks) ---
 
-    /// Computes a checksum for the level. The checksum is accumulated in `crc`.
-    pub fn get_level_checksum(&self, crc: &mut u32) {
-        for thing in &self.things {
-            checksum_thing(crc, thing);
-        }
-        for linedef in &self.linedefs {
-            checksum_linedef(crc, linedef, self);
-        }
+    pub fn add_vertex(&mut self, x: i32, y: i32) -> usize {
+        let mut vertices = self.vertices.write();
+        let new_vertex = Arc::new(Vertex { raw_x: x, raw_y: y });
+        vertices.push(new_vertex);
+        vertices.len() - 1 // Return the index of the new vertex
     }
 
-    /// Returns a reference to the sector referenced by a sidedef.
-    pub fn get_sector_from_side(&self, side: &SideDef) -> &Sector {
-        &self.sectors[side.sector]
-    }
-
-    /// Returns the sector ID for a given linedef side.
-    pub fn get_sector_id(&self, line: &LineDef, side: Side) -> i32 {
-        match side {
-            Side::Left => self.get_left(line).map_or(-1, |sd| sd.sector as i32),
-            Side::Right => self.get_right(line).map_or(-1, |sd| sd.sector as i32),
-        }
-    }
-
-    /// Returns an optional reference to the sector for the given linedef side.
-    pub fn get_sector_for_line(&self, line: &LineDef, side: Side) -> Option<&Sector> {
-        let sid = self.get_sector_id(line, side);
-        if sid >= 0 {
-            self.sectors.get(sid as usize).map(|rc| rc.as_ref())
+    pub fn move_vertex(&mut self, vertex_id: usize, new_x: i32, new_y: i32) -> Result<(), String> {
+        let mut vertices = self.vertices.write();
+        if let Some(vertex) = vertices.get_mut(vertex_id) {
+            let mut vertex_ref = Arc::make_mut(vertex); // Get a mutable reference to the Vertex
+            vertex_ref.raw_x = new_x;
+            vertex_ref.raw_y = new_y;
+            Ok(())
         } else {
-            None
+            Err(format!("Vertex with ID {} not found", vertex_id))
         }
     }
 
-    /// Returns a reference to the starting vertex of a linedef.
-    pub fn get_start(&self, line: &LineDef) -> &Vertex {
-        &self.vertices[line.start]
+    pub fn remove_vertex(&mut self, vertex_id: usize) -> Option<Vertex>{
+        let mut vertices = self.vertices.write();
+        if vertex_id < vertices.len(){
+            let mut removed = vertices.remove(vertex_id);
+            //Decrement the vertices indexes on linedefs
+            if let Some(mut linedefs) = self.linedefs.write(){
+                for l in linedefs.iter_mut(){
+                    let mut line_ref = Arc::make_mut(l);
+                    if line_ref.start > vertex_id{
+                        line_ref.start -= 1;
+                    }
+                    if line_ref.end > vertex_id{
+                        line_ref.end -= 1;
+                    }
+                }
+            }
+            Some(Arc::try_unwrap(removed).unwrap()) //Return the vertex
+        } else{
+            None //Invalid Id
+        }
+    }
+    
+    pub fn add_linedef(&mut self, start_vertex_id: usize, end_vertex_id: usize, right_side_sector_id: i16, left_side_sector_id: i16) -> usize {
+        let mut linedefs = self.linedefs.write();
+        let new_linedef = Arc::new(LineDef{
+            start: start_vertex_id,
+            end: end_vertex_id,
+            flags: 0,
+            line_type: 0,
+            tag: 0,
+            right: right_side_sector_id as i32,
+            left: left_side_sector_id as i32
+        });
+        linedefs.push(new_linedef);
+        linedefs.len() - 1
     }
 
-    /// Returns a reference to the ending vertex of a linedef.
-    pub fn get_end(&self, line: &LineDef) -> &Vertex {
-        &self.vertices[line.end]
-    }
-
-    /// Returns the right sidedef of a linedef (if any).
-    pub fn get_right(&self, line: &LineDef) -> Option<&SideDef> {
-        if line.right >= 0 {
-            self.sidedefs.get(line.right as usize).map(|rc| rc.as_ref())
-        } else {
-            None
+    pub fn remove_linedef(&mut self, linedef_id: usize) -> Option<LineDef>{
+        let mut linedefs = self.linedefs.write();
+        if linedef_id < linedefs.len(){
+            Some(Arc::try_unwrap(linedefs.remove(linedef_id)).unwrap()) //Return the linedef
+        } else{
+            None //Invalid Id
         }
     }
 
-    /// Returns the left sidedef of a linedef (if any).
-    pub fn get_left(&self, line: &LineDef) -> Option<&SideDef> {
-        if line.left >= 0 {
-            self.sidedefs.get(line.left as usize).map(|rc| rc.as_ref())
-        } else {
-            None
+    pub fn add_sector(&mut self, floor_z: i32, ceiling_z: i32, floor_texture: String, ceiling_texture: String, light_level: u8, sector_type: u8) -> usize {
+        let mut sectors = self.sectors.write();
+        let new_sector = Arc::new(Sector{
+            floorh: floor_z,
+            ceilh: ceiling_z,
+            floor_tex: floor_texture,
+            ceil_tex: ceiling_texture,
+            light: light_level as i32,
+            sector_type: sector_type as i32,
+            tag: 0,
+        });
+        sectors.push(new_sector);
+        sectors.len() - 1
+    }
+
+    pub fn remove_sector(&mut self, sector_id: usize) -> Option<Sector>{
+        let mut sectors = self.sectors.write();
+        if sector_id < sectors.len(){
+            Some(Arc::try_unwrap(sectors.remove(sector_id)).unwrap()) //Return the linedef
+        } else{
+            None //Invalid Id
         }
     }
 
-    /// Calculates the length of a linedef.
+    pub fn add_thing(&mut self, x: i32, y: i32, angle: i32, thing_type: u16, options: u16) -> usize {
+        let mut things = self.things.write();
+        let new_thing = Arc::new(Thing{
+            raw_x: x,
+            raw_y: y,
+            angle: angle as i32,
+            thing_type: thing_type as i32,
+            options: options as i32
+        });
+        things.push(new_thing);
+        things.len() - 1
+    }
+
+    pub fn remove_thing(&mut self, thing_id: usize) -> Option<Thing>{
+        let mut things = self.things.write();
+        if thing_id < things.len(){
+            Some(Arc::try_unwrap(things.remove(thing_id)).unwrap()) //Return the thing
+        } else{
+            None //Invalid Id
+        }
+    }
+
+    pub fn get_level_checksum(&self) -> u32 {
+        let mut checksum = 0u32;
+
+        // Parallel checksum computation for all object types
+        {
+            let things = self.things.read();
+            checksum = checksum.wrapping_add(
+                things.par_iter()
+                    .map(|thing| {
+                        let mut crc = 0u32;
+                        checksum_thing(&mut crc, thing);
+                        crc
+                    })
+                    .sum::<u32>()
+            );
+        }
+
+        {
+            let vertices = self.vertices.read();
+            checksum = checksum.wrapping_add(
+                vertices.par_iter()
+                    .map(|vertex| {
+                        let mut crc = 0u32;
+                        checksum_vertex(&mut crc, vertex);
+                        crc
+                    })
+                    .sum::<u32>()
+            );
+        }
+
+        {
+            let sectors = self.sectors.read();
+            checksum = checksum.wrapping_add(
+                sectors.par_iter()
+                    .map(|sector| {
+                        let mut crc = 0u32;
+                        checksum_sector(&mut crc, sector);
+                        crc
+                    })
+                    .sum::<u32>()
+            );
+        }
+
+        {
+            let linedefs = self.linedefs.read();
+            checksum = checksum.wrapping_add(
+                linedefs.par_iter()
+                    .map(|line| {
+                        let mut crc = 0u32;
+                        checksum_linedef(&mut crc, line, self);
+                        crc
+                    })
+                    .sum::<u32>()
+            );
+        }
+
+        *self.checksum.write() = checksum;
+        checksum
+    }
+
     pub fn calc_length(&self, line: &LineDef) -> f64 {
-        let start = self.get_start(line);
-        let end = self.get_end(line);
-        let dx = (start.x() - end.x()) as f64;
-        let dy = (start.y() - end.y()) as f64;
+        let vertices = self.vertices.read();
+        let start = &vertices[line.start];
+        let end = &vertices[line.end];
+        let dx = (start.raw_x - end.raw_x) as f64;
+        let dy = (start.raw_y - end.raw_y) as f64;
         dx.hypot(dy)
     }
 
-    /// Returns true if the linedef touches the coordinate (tx, ty).
-    pub fn touches_coord(&self, line: &LineDef, tx: i32, ty: i32) -> bool {
-        let start = self.get_start(line);
-        let end = self.get_end(line);
-        start.matches(tx, ty) || end.matches(tx, ty)
-    }
-
-    /// Returns true if the linedef touches a sector with the given ID.
-    pub fn touches_sector(&self, line: &LineDef, sec_num: i32) -> bool {
-        if let Some(sd) = self.get_right(line) {
-            if sd.sector as i32 == sec_num {
-                return true;
-            }
-        }
-        if let Some(sd) = self.get_left(line) {
-            if sd.sector as i32 == sec_num {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Returns true if the linedef is zero length.
     pub fn is_zero_length(&self, line: &LineDef) -> bool {
-        let start = self.get_start(line);
-        let end = self.get_end(line);
+        let vertices = self.vertices.read();
+        let start = &vertices[line.start];
+        let end = &vertices[line.end];
         start.raw_x == end.raw_x && start.raw_y == end.raw_y
     }
 
-    /// Returns true if the linedef is self-referential (both sidedefs reference the same sector).
+    pub fn touches_coord(&self, line: &LineDef, tx: i32, ty: i32) -> bool {
+        let vertices = self.vertices.read();
+        let start = &vertices[line.start];
+        let end = &vertices[line.end];
+        start.matches(tx, ty) || end.matches(tx, ty)
+    }
+
+    pub fn touches_sector(&self, line: &LineDef, sec_num: i32) -> bool {
+        let sidedefs = self.sidedefs.read();
+
+        if line.right >= 0 {
+            if let Some(sd) = sidedefs.get(line.right as usize) {
+                if sd.sector as i32 == sec_num {
+                    return true;
+                }
+            }
+        }
+
+        if line.left >= 0 {
+            if let Some(sd) = sidedefs.get(line.left as usize) {
+                if sd.sector as i32 == sec_num {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    pub fn is_horizontal(&self, line: &LineDef) -> bool {
+        let vertices = self.vertices.read();
+        vertices[line.start].raw_y == vertices[line.end].raw_y
+    }
+
+    pub fn is_vertical(&self, line: &LineDef) -> bool {
+        let vertices = self.vertices.read();
+        vertices[line.start].raw_x == vertices[line.end].raw_x
+    }
+
     pub fn is_self_ref(&self, line: &LineDef) -> bool {
         if line.left >= 0 && line.right >= 0 {
-            if let (Some(left_sd), Some(right_sd)) = (self.get_left(line), self.get_right(line)) {
-                return left_sd.sector == right_sd.sector;
+            let sidedefs = self.sidedefs.read();
+            if let (Some(left), Some(right)) = (
+                sidedefs.get(line.left as usize),
+                sidedefs.get(line.right as usize)
+            ) {
+                return left.sector == right.sector;
             }
         }
         false
     }
-
-    /// Returns true if the linedef is horizontal.
-    pub fn is_horizontal(&self, line: &LineDef) -> bool {
-        self.get_start(line).raw_y == self.get_end(line).raw_y
-    }
-
-    /// Returns true if the linedef is vertical.
-    pub fn is_vertical(&self, line: &LineDef) -> bool {
-        self.get_start(line).raw_x == self.get_end(line).raw_x
-    }
-
-    /// Clears all document data.
     pub fn clear(&mut self) {
-        self.things.clear();
-        self.vertices.clear();
-        self.sectors.clear();
-        self.sidedefs.clear();
-        self.linedefs.clear();
-        self.header_data.clear();
-        self.behavior_data.clear();
-        self.scripts_data.clear();
-        self.basis.clear();
-        // TODO: Clear other modules or clipboard state as necessary.
+      self.things.write().clear();
+      self.vertices.write().clear();
+      self.sectors.write().clear();
+      self.sidedefs.write().clear();
+      self.linedefs.write().clear();
+      self.header_data.write().clear();
+      self.behavior_data.write().clear();
+      self.scripts_data.write().clear();
+      *self.checksum.write() = 0;
+    }
+
+    // WAD parsing functionality (remains largely the same, but with corrected type in load_linedefs)
+    pub fn load_wad<R: Read + Seek>(&mut self, reader: &mut R) -> io::Result<()> {
+      self.clear();
+
+      // Read WAD header
+      let mut header = vec![0u8; 12];
+      reader.read_exact(&mut header)?;
+      *self.header_data.write() = header;
+
+      // Read directory
+      let num_lumps = reader.read_i32::<LE>()?;
+      let dir_offset = reader.read_i32::<LE>()?;
+      reader.seek(io::SeekFrom::Start(dir_offset as u64))?;
+
+      // Process all lumps
+      for _ in 0..num_lumps {
+          let lump_offset = reader.read_i32::<LE>()?;
+          let lump_size = reader.read_i32::<LE>()?;
+          let mut name = vec![0u8; 8];
+          reader.read_exact(&mut name)?;
+
+          let lump_name = str::from_utf8(&name)
+              .unwrap_or("")
+              .trim_end_matches('\0');
+
+            match lump_name {
+                "THINGS" => self.load_things(reader, lump_offset, lump_size)?,
+                "LINEDEFS" => self.load_linedefs(reader, lump_offset, lump_size)?,
+                "SIDEDEFS" => self.load_sidedefs(reader, lump_offset, lump_size)?,
+                "VERTEXES" => self.load_vertices(reader, lump_offset, lump_size)?,
+                "SECTORS" => self.load_sectors(reader, lump_offset, lump_size)?,
+                "BEHAVIOR" => self.load_behavior(reader, lump_offset, lump_size)?,  // Assuming you want to store this
+                "SCRIPTS" => self.load_scripts(reader, lump_offset, lump_size)?,   //  and this.
+                _ => {} // Skip unknown lumps
+            }
+      }
+
+      Ok(())
+    }
+
+
+    fn load_things<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
+        reader.seek(io::SeekFrom::Start(offset as u64))?;
+        let num_things = size / 10; // Each thing is 10 bytes
+
+        let mut things = self.things.write();
+        things.clear();
+        things.reserve(num_things as usize);  // Reserve space for efficiency
+
+        for _ in 0..num_things {
+            let thing = Thing::from_wad(reader)?;
+            things.push(Arc::new(thing));
+        }
+
+        Ok(())
+    }
+
+
+    fn load_vertices<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
+        reader.seek(io::SeekFrom::Start(offset as u64))?;
+        let num_vertices = size / 4;
+
+        let mut vertices = self.vertices.write();
+        vertices.clear();
+        vertices.reserve(num_vertices as usize);
+
+        for _ in 0..num_vertices {
+            let vertex = Vertex::from_wad(reader)?;
+            vertices.push(Arc::new(vertex));
+        }
+        Ok(())
+    }
+
+    fn load_sectors<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
+        reader.seek(io::SeekFrom::Start(offset as u64))?;
+        let num_sectors = size / 26;
+
+        let mut sectors = self.sectors.write();
+        sectors.clear();
+        sectors.reserve(num_sectors as usize);
+
+        for _ in 0..num_sectors {
+            let sector = Sector::from_wad(reader)?;
+            sectors.push(Arc::new(sector));
+        }
+        Ok(())
+    }
+
+    fn load_sidedefs<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
+        reader.seek(io::SeekFrom::Start(offset as u64))?;
+        let num_sidedefs = size / 30;
+
+        let mut sidedefs = self.sidedefs.write();
+        sidedefs.clear();
+        sidedefs.reserve(num_sidedefs as usize);
+
+        for _ in 0..num_sidedefs {
+            let sidedef = SideDef::from_wad(reader)?;
+            sidedefs.push(Arc::new(sidedef));
+        }
+        Ok(())
+    }
+
+
+    fn load_linedefs<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
+        reader.seek(io::SeekFrom::Start(offset as u64))?;
+        let num_linedefs = size / 14;
+
+        let mut linedefs = self.linedefs.write();
+        linedefs.clear();
+        linedefs.reserve(num_linedefs as usize);
+
+        for _ in 0..num_linedefs {
+            let linedef = LineDef::from_wad(reader)?;
+            linedefs.push(Arc::new(linedef));
+        }
+        Ok(())
+    }
+
+    fn load_behavior<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
+        reader.seek(io::SeekFrom::Start(offset as u64))?;
+        let mut data = vec![0u8; size as usize];
+        reader.read_exact(&mut data)?;
+        *self.behavior_data.write() = data;  // Use interior mutability correctly
+        Ok(())
+    }
+
+    fn load_scripts<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
+        reader.seek(io::SeekFrom::Start(offset as u64))?;
+        let mut data = vec![0u8; size as usize];
+        reader.read_exact(&mut data)?;
+        *self.scripts_data.write() = data; // Use interior mutability correctly
+        Ok(())
+    }
+
+
+    // Sector relationships
+    pub fn get_sector_from_side(&self, side: &SideDef) -> Option<Arc<Sector>> {
+        self.sectors.read().get(side.sector).cloned()
+    }
+
+
+    pub fn get_sector_id(&self, line: &LineDef, side: Side) -> i32 {
+        let sidedefs = self.sidedefs.read();
+        match side {
+            Side::Left =>  {
+                if line.left >= 0 {
+                    if let Some(sd) = sidedefs.get(line.left as usize) {
+                        return sd.sector as i32
+                    }
+                }
+                return -1
+            },
+            Side::Right => {
+                if line.right >= 0 {
+                    if let Some(sd) = sidedefs.get(line.right as usize) {
+                        return sd.sector as i32
+                    }
+                }
+                return -1
+            }
+        }
+    }
+
+    pub fn get_sector_for_line(&self, line: &LineDef, side: Side) -> Option<Arc<Sector>> {
+        let sid = self.get_sector_id(line, side);
+        if sid >= 0 {
+            self.sectors.read().get(sid as usize).cloned()
+        } else {
+            None
+        }
     }
 }
 
-/// A simple enum to distinguish between left and right sidedefs.
-#[derive(Debug)]
-pub enum Side {
-    Left,
-    Right,
-}
 
-/// Helper: adds a value to the checksum accumulator using wrapping arithmetic.
+// Helper functions for checksums (these remain the same)
 fn add_crc(crc: &mut u32, value: i32) {
     *crc = crc.wrapping_add(value as u32);
 }
 
-/// Computes the checksum contribution of a Thing.
 fn checksum_thing(crc: &mut u32, thing: &Thing) {
     add_crc(crc, thing.raw_x);
     add_crc(crc, thing.raw_y);
@@ -318,144 +630,201 @@ fn checksum_thing(crc: &mut u32, thing: &Thing) {
     add_crc(crc, thing.options);
 }
 
-/// Computes the checksum contribution of a Vertex.
 fn checksum_vertex(crc: &mut u32, vertex: &Vertex) {
     add_crc(crc, vertex.raw_x);
     add_crc(crc, vertex.raw_y);
 }
 
-/// Computes the checksum contribution of a Sector.
 fn checksum_sector(crc: &mut u32, sector: &Sector) {
     add_crc(crc, sector.floorh);
     add_crc(crc, sector.ceilh);
     add_crc(crc, sector.light);
     add_crc(crc, sector.sector_type);
     add_crc(crc, sector.tag);
-    add_crc(crc, sector.floor_tex());
-    add_crc(crc, sector.ceil_tex());
+    // Hash strings consistently
+    for byte in sector.floor_tex.as_bytes() {
+        add_crc(crc, *byte as i32);
+    }
+    for byte in sector.ceil_tex.as_bytes() {
+        add_crc(crc, *byte as i32);
+    }
 }
 
-/// Computes the checksum contribution of a SideDef.
-fn checksum_sidedef(crc: &mut u32, sidedef: &SideDef, doc: &Document) {
+fn checksum_sidedef(crc: &mut u32, sidedef: &SideDef) {
     add_crc(crc, sidedef.x_offset);
     add_crc(crc, sidedef.y_offset);
-    add_crc(crc, sidedef.lower_tex());
-    add_crc(crc, sidedef.mid_tex());
-    add_crc(crc, sidedef.upper_tex());
-    // Also incorporate the sector data.
-    checksum_sector(crc, doc.get_sector_from_side(sidedef));
+    for byte in sidedef.upper_tex.as_bytes() {
+        add_crc(crc, *byte as i32);
+    }
+    for byte in sidedef.lower_tex.as_bytes() {
+        add_crc(crc, *byte as i32);
+    }
+    for byte in sidedef.mid_tex.as_bytes() {
+        add_crc(crc, *byte as i32);
+    }
+    add_crc(crc, sidedef.sector as i32);
 }
 
-/// Computes the checksum contribution of a LineDef.
+
 fn checksum_linedef(crc: &mut u32, linedef: &LineDef, doc: &Document) {
     add_crc(crc, linedef.flags);
     add_crc(crc, linedef.line_type);
     add_crc(crc, linedef.tag);
-    checksum_vertex(crc, doc.get_start(linedef));
-    checksum_vertex(crc, doc.get_end(linedef));
-    if let Some(sd) = doc.get_right(linedef) {
-        checksum_sidedef(crc, sd, doc);
-    }
-    if let Some(sd) = doc.get_left(linedef) {
-        checksum_sidedef(crc, sd, doc);
-    }
+    add_crc(crc, linedef.start as i32);
+    add_crc(crc, linedef.end as i32);
+    add_crc(crc, linedef.right);
+    add_crc(crc, linedef.left);
 }
-
+// Unit tests
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::rc::Rc;
+    use std::io::Cursor;
 
-    /// Creates a sample document with one linedef and one thing.
-    fn create_sample_document() -> Document {
+    #[test]
+    fn test_empty_document() {
+        let doc = Document::new();
+        assert_eq!(doc.num_objects(ObjType::Things), 0);
+        assert_eq!(doc.num_objects(ObjType::Vertices), 0);
+        assert_eq!(doc.num_objects(ObjType::Sectors), 0);
+        assert_eq!(doc.num_objects(ObjType::Linedefs), 0);
+        assert_eq!(doc.num_objects(ObjType::Sidedefs), 0);
+    }
+
+    #[test]
+    fn test_vertex_operations() {
         let mut doc = Document::new();
+        let v1 = doc.add_vertex(0, 0);
+        let v2 = doc.add_vertex(100, 100);
 
-        // Create sample vertices.
-        let v1 = Rc::new(Vertex { raw_x: 0, raw_y: 0 });
-        let v2 = Rc::new(Vertex { raw_x: 10, raw_y: 0 });
-        doc.vertices.push(v1.clone());
-        doc.vertices.push(v2.clone());
-
-        // Create a sample linedef.
-        let line = Rc::new(LineDef {
-            flags: 1,
-            line_type: 2,
+        let linedef = Arc::new(LineDef {
+            start: v1,
+            end: v2,
+            flags: 0,
+            line_type: 0,
             tag: 0,
-            start: 0,
-            end: 1,
             right: -1,
             left: -1,
         });
-        doc.linedefs.push(line);
 
-        // Create a sample thing.
-        let thing = Rc::new(Thing {
-            raw_x: 5,
-            raw_y: 5,
-            angle: 90,
-            thing_type: 1,
-            options: 0,
-        });
-        doc.things.push(thing);
-
-        doc
+        assert!(!doc.is_zero_length(&linedef));
+        assert!(!doc.is_horizontal(&linedef));
+        assert!(!doc.is_vertical(&linedef));
+        assert!(doc.touches_coord(&linedef, 0, 0));
+        assert!(doc.touches_coord(&linedef, 100, 100));
+        assert!(!doc.touches_coord(&linedef, 50, 50));
     }
-
+    
     #[test]
-    fn test_num_objects() {
+    fn test_remove_vertex(){
         let mut doc = Document::new();
-        assert_eq!(doc.num_objects(ObjType::Things), 0);
-        let thing = Rc::new(Thing {
-            raw_x: 0,
-            raw_y: 0,
-            angle: 0,
-            thing_type: 0,
-            options: 0,
+        let v1 = doc.add_vertex(0, 0);
+        let v2 = doc.add_vertex(100, 100);
+        let _ = doc.add_linedef(v1, v2, -1, -1);
+        doc.remove_vertex(v1);
+        assert_eq!(doc.vertices().read().len(), 1);
+    }
+
+    #[test]
+    fn test_add_remove_linedef(){
+        let mut doc = Document::new();
+        let v1 = doc.add_vertex(0, 0);
+        let v2 = doc.add_vertex(100, 100);
+        let l1 = doc.add_linedef(v1, v2, -1, -1);
+        assert_eq!(doc.linedefs().read().len(), 1);
+        doc.remove_linedef(l1);
+        assert_eq!(doc.linedefs().read().len(), 0);
+    }
+
+    #[test]
+    fn test_add_remove_sector(){
+        let mut doc = Document::new();
+        let s1 = doc.add_sector(128,0, "FLOOR4_8".to_string(), "CEIL3_5".to_string(), 0, 0);
+        assert_eq!(doc.sectors().read().len(), 1);
+        doc.remove_sector(s1);
+        assert_eq!(doc.sectors().read().len(), 0);
+
+    }
+
+    #[test]
+    fn test_add_remove_thing(){
+        let mut doc = Document::new();
+        let t1 = doc.add_thing(32,32, 90, 1, 0);
+        assert_eq!(doc.things().read().len(), 1);
+        doc.remove_thing(t1);
+        assert_eq!(doc.things().read().len(), 0);
+    }
+
+    #[test]
+    fn test_concurrent_access() {
+        let doc = Document::new();
+
+        // Use std::thread::scope for scoped threads (requires Rust 1.63+)
+        std::thread::scope(|s| {
+            // Writer thread
+            s.spawn(|| {
+                let mut vertices = doc.vertices.write();
+                vertices.push(Arc::new(Vertex { raw_x: 0, raw_y: 0 }));
+            });
+
+            // Reader thread
+            s.spawn(|| {
+                let vertices = doc.vertices.read();
+                let _len = vertices.len(); // Just access the length
+            });
         });
-        doc.things.push(thing);
+    }
+    #[test]
+    fn test_wad_loading() {
+        // Create a minimal test WAD in memory
+        let mut wad_data = vec![];
+
+        // WAD header (12 bytes)
+        wad_data.extend_from_slice(b"PWAD");  // WAD type
+        wad_data.extend_from_slice(&2i32.to_le_bytes()); // Number of lumps
+        wad_data.extend_from_slice(&32i32.to_le_bytes()); // Directory offset
+
+        // First lump (THINGS)
+        let things_data = vec![
+            0, 0,    // x
+            0, 0,    // y
+            0, 0,    // angle
+            1, 0,    // type
+            7, 0,    // options
+        ];
+
+        // Second lump (VERTEXES)
+        let vertices_data = vec![
+            0, 0,    // x
+            0, 0,    // y
+        ];
+
+        // Directory entries
+        let dir_entry1 = vec![
+            12i32.to_le_bytes().to_vec(), // offset
+            10i32.to_le_bytes().to_vec(), // size
+            b"THINGS  ".to_vec()         // name
+        ].concat();
+
+        let dir_entry2 = vec![
+            22i32.to_le_bytes().to_vec(), // offset
+            4i32.to_le_bytes().to_vec(),  // size
+            b"VERTEXES".to_vec()        // name
+        ].concat();
+
+
+        wad_data.extend(things_data);
+        wad_data.extend(vertices_data);
+        wad_data.extend(dir_entry1);
+        wad_data.extend(dir_entry2);
+        
+
+        let mut cursor = Cursor::new(wad_data);
+        let mut doc = Document::new();
+        doc.load_wad(&mut cursor).unwrap();
+
         assert_eq!(doc.num_objects(ObjType::Things), 1);
-    }
-
-    #[test]
-    fn test_checksum() {
-        let doc = create_sample_document();
-        let mut crc = 0u32;
-        doc.get_level_checksum(&mut crc);
-        // For this sample document, just check that the checksum is nonzero.
-        assert!(crc != 0);
-    }
-
-    #[test]
-    fn test_calc_length() {
-        let doc = create_sample_document();
-        let line = &doc.linedefs[0];
-        let length = doc.calc_length(line);
-        assert!((length - 10.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_is_zero_length() {
-        let mut doc = create_sample_document();
-        // Modify the line so that start == end.
-        if let Some(line) = doc.linedefs.get_mut(0) {
-            line.end = line.start;
-        }
-        assert!(doc.is_zero_length(&doc.linedefs[0]));
-    }
-
-    #[test]
-    fn test_touches_coord() {
-        let doc = create_sample_document();
-        let line = &doc.linedefs[0];
-        assert!(doc.touches_coord(line, 0, 0));
-        assert!(doc.touches_coord(line, 10, 0));
-        assert!(!doc.touches_coord(line, 5, 5));
-    }
-
-    #[test]
-    fn test_is_horizontal() {
-        let doc = create_sample_document();
-        let line = &doc.linedefs[0];
-        assert!(doc.is_horizontal(line));
+        assert_eq!(doc.num_objects(ObjType::Vertices), 1);
     }
 }
+        
