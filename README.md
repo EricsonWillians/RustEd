@@ -1,6 +1,3 @@
-Below is an extremely comprehensive `README.md` for RustEd. It includes detailed sections about the project overview, features, architecture, usage, and contribution guidelines. The project structure is drawn in a clear ASCII tree format. You can copy and save this content as your project's `README.md`.
-
-```markdown
 # RustEd
 
 RustEd is a high-performance, concurrent Doom map editor with procedural generation, inspired by the classic Eureka editor. Written entirely in Rust, RustEd leverages modern programming practices and a modular architecture to provide a safe, extensible, and responsive editing experience for game level designers.
@@ -284,10 +281,3 @@ For questions, suggestions, or contributions, please reach out to:
 - GitHub: [EricsonWillians/RustEd](https://github.com/EricsonWillians/RustEd)
 
 ---
-
-Happy mapping with **RustEd**!
-```
-
----
-
-This README.md offers a comprehensive guide to the project, including an easily understandable project structure diagram, setup instructions, and contribution guidelines. Customize any sections as needed to match your project's evolving needs.
