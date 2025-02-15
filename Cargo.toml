@@ -1,0 +1,64 @@
+[package]
+name = "RustEd"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ericson Willians <ericsonwillians@protonmail.com>"]
+description = "A high-performance, concurrent Doom map editor with procedural generation, inspired by the classic Eureka editor."
+license = "MIT"
+repository = "https://github.com/ericsonwillians/RustEd"
+documentation = "https://docs.rs/rusted"
+keywords = ["doom", "editor", "procedural-generation", "concurrency", "rayon", "egui"]
+categories = ["game-tools", "graphics"]
+
+# Optional build script for resource embedding or compile-time tasks.
+build = "build.rs"
+
+[dependencies]
+# UI Libraries
+egui = "0.20"
+egui-winit = "0.20"
+eframe = "0.20"
+winit = "0.27"
+
+# Concurrency & Parallelism
+rayon = "1.6"
+
+# Logging
+log = "0.4"
+env_logger = "0.9"
+
+# Serialization (for config, assets, etc.)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Image processing and binary I/O support (if needed)
+image = "0.24"
+byteorder = "1.4"
+
+[build-dependencies]
+# Example: use include_dir to embed resources at compile time.
+include_dir = "0.7"
+
+[dev-dependencies]
+# Testing and benchmarking utilities.
+assert_approx_eq = "1.1"
+
+[features]
+# Define conditional compilation features.
+default = ["gui"]
+gui = []
+headless = []
+
+[profile.release]
+# Optimize for maximum performance.
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.dev]
+# Faster compile times for development.
+opt-level = 1
+
+[package.metadata]
+# Additional metadata can be added here.
+# For example, configuration for documentation or CI integration.
