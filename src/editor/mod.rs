@@ -1,20 +1,20 @@
 // src/editor/mod.rs
 
-mod commands;
-mod cutpaste;  // Example - you had this file, so keep the module.
-mod generator;
-mod hover;
+pub mod commands;
+pub mod cutpaste;  // Example - you had this file, so keep the module.
+pub mod generator;
+pub mod hover;
 pub mod instance;
-mod linedef;
+pub mod linedef;
 pub mod objects;
-mod sector;
-mod things;
-mod vertex;
+pub mod sector;
+pub mod things;
+pub mod vertex;
 
 pub use commands::Command;
 pub use generator::ProceduralGenerator;  // Make sure you can access the generator
 
-use crate::bsp::{BspLevel};
+use crate::bsp::BspLevel;
 use crate::document::Document;
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -94,8 +94,8 @@ pub struct Editor {
 
     // --- Additions for a more robust editor ---
     /// History of undo/redo actions.
-    undo_stack: Vec<Command>,
-    redo_stack: Vec<Command>,
+    undo_stack: Vec<Box<dyn Command>>,
+    redo_stack: Vec<Box<dyn Command>>,
 
     /// Flag indicating if the document has unsaved changes.
     is_dirty: bool,
@@ -181,18 +181,18 @@ impl Editor {
         let v2 = doc_guard.add_vertex(200, 100);
         let v3 = doc_guard.add_vertex(200, 200);
         let v4 = doc_guard.add_vertex(100, 200);
-        let sector = doc_guard.add_sector(128,0, "FLOOR4_8".to_string(), "CEIL3_5".to_string(), 0, 0); // Add a sector.
-        doc_guard.add_linedef(v1, v2, -1, -1, sector as i16, sector as i16, false, false, false, false, false, false, false, 0, 0, "WALL1".to_string()); // Example linedef
-        doc_guard.add_linedef(v2, v3, -1, -1, sector as i16, sector as i16, false, false, false, false, false, false, false, 0, 0, "WALL1".to_string());
-        doc_guard.add_linedef(v3, v4, -1, -1, sector as i16, sector as i16, false, false, false, false, false, false, false, 0, 0, "WALL1".to_string());
-        doc_guard.add_linedef(v4, v1, -1, -1, sector as i16, sector as i16, false, false, false, false, false, false, false, 0, 0, "WALL1".to_string());
+        let _sector = doc_guard.add_sector(128,0, "FLOOR4_8".to_string(), "CEIL3_5".to_string(), 0, 0); // Add a sector.
+        doc_guard.add_linedef(v1, v2, -1, -1); // Example linedef
+        doc_guard.add_linedef(v2, v3, -1, -1);
+        doc_guard.add_linedef(v3, v4, -1, -1);
+        doc_guard.add_linedef(v4, v1, -1, -1);
 
         drop(doc_guard);
         let _ = self.build_nodes();
     }
 
 
-    pub fn execute_command(&mut self, command: Command) {
+    pub fn execute_command<T: Command + 'static>(&mut self, command: T) { 
         // 1. Execute the command, potentially modifying the document.
         let mut doc_guard = self.document.write(); // Get write access to the document
         if let Err(err) = command.execute(&mut doc_guard) { // Pass mutable reference
@@ -201,7 +201,7 @@ impl Editor {
         }
         drop(doc_guard);
         // 2. Push the command onto the undo stack.
-        self.undo_stack.push(command);
+        self.undo_stack.push(Box::new(command));
 
         // 3. Clear the redo stack.
         self.redo_stack.clear();

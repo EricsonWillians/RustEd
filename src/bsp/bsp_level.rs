@@ -1,348 +1,393 @@
-// src/bsp/bsp_level.rs
-
-use crate::bsp::{BspNode, SegPosition, Line2D, BoundingBox, EPSILON, BLOCK_SIZE, Point2D, BSP_DEPTH_LIMIT};
-use crate::document::{Document, LineDef, Vertex, Sector}; // Corrected type paths
 use std::sync::Arc;
-use parking_lot::RwLock;
-//use rayon::prelude::*; // Remove this for now.
 
-// Definition of 'Seg'
-#[derive(Debug, Clone)] // Add Clone
+use parking_lot::RwLock;
+
+use crate::{
+    bsp::{
+        BspNode, SegPosition, Line2D, BoundingBox,
+        EPSILON, BLOCK_SIZE, Point2D, BSP_DEPTH_LIMIT
+    },
+    document::{Document, LineDef, Vertex, Sector},
+};
+
+#[derive(Debug, Clone)]
 pub struct Seg {
     pub start: Point2D,
     pub end: Point2D,
     pub angle: f64,
     pub length: f64,
+    /// If you want to sort segs by something in the linedef, add that field to `LineDef`.
     pub linedef: Option<Arc<LineDef>>,
-    pub side: SegmentSide,  // Keep track if it's a front (right) or back (left) side
-    pub partner: Option<Arc<Seg>>, // For two-sided linedefs.  Optional.
+    pub side: SegmentSide,
+    /// For two-sided linedefs, the front/back segs can reference each other.
+    pub partner: Option<Arc<Seg>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SegmentSide {
-    Front, // Right side of linedef
-    Back,  // Left side of linedef
+    Front,
+    Back,
 }
 
 #[derive(Debug)]
 pub struct Subsector {
     pub segs: Vec<Arc<Seg>>,
-    pub bbox: BoundingBox,        // Bounding box for the subsector
-    pub sector: Option<Arc<Sector>>,   // The sector this subsector belongs to
+    pub bbox: BoundingBox,
+    pub sector: Option<Arc<Sector>>,
 }
 
-// Block definition
-#[derive(Debug, Default)]  // Add Default for easier initialization
+// --------------------------------------------------------------------
+// Block definition for the blockmap
+// --------------------------------------------------------------------
+#[derive(Debug, Default)]
 pub struct Block {
     pub x: i32,
     pub y: i32,
     pub width: i32,
     pub height: i32,
-    pub cells: Vec<Vec<usize>>, // Linedef indices
+    pub cells: Vec<Vec<usize>>,  // each cell references linedef indices or seg indices
 }
-// Implementing new for Bsp_level::Block
+
 impl Block {
     pub fn new(bounds: BoundingBox) -> Self {
-      let x = bounds.min_x as i32 / BLOCK_SIZE;
-      let y = bounds.min_y as i32 / BLOCK_SIZE;
-      let width = ((bounds.max_x - bounds.min_x) as i32 / BLOCK_SIZE) + 1;
-      let height = ((bounds.max_y - bounds.min_y) as i32 / BLOCK_SIZE) + 1;
+        let x = (bounds.min_x as i32) / BLOCK_SIZE;
+        let y = (bounds.min_y as i32) / BLOCK_SIZE;
+        let w = ((bounds.max_x - bounds.min_x) as i32 / BLOCK_SIZE) + 1;
+        let h = ((bounds.max_y - bounds.min_y) as i32 / BLOCK_SIZE) + 1;
+        let size = (w * h) as usize;
+
         Self {
             x,
             y,
-            width,
-            height,
-            cells: vec![vec![]; (width * height) as usize], // Initialize cells
+            width: w,
+            height: h,
+            cells: vec![vec![]; size],
         }
     }
-    // Add get_cell_mut method too
-    pub fn get_cell_mut(&mut self, x: i32, y: i32) -> Option<&mut Vec<usize>> {
-      let adjusted_x = x - self.x;
-      let adjusted_y = y - self.y;
-        if adjusted_x >= 0 && adjusted_x < self.width && adjusted_y >= 0 && adjusted_y < self.height{
-            let index = (adjusted_y * self.width + adjusted_x) as usize;
-            return self.cells.get_mut(index)
+
+    pub fn get_cell_mut(&mut self, cx: i32, cy: i32) -> Option<&mut Vec<usize>> {
+        let rel_x = cx - self.x;
+        let rel_y = cy - self.y;
+        if rel_x >= 0 && rel_x < self.width && rel_y >= 0 && rel_y < self.height {
+            let idx = (rel_y * self.width + rel_x) as usize;
+            self.cells.get_mut(idx)
+        } else {
+            None
         }
-        None
-  }
+    }
 }
 
+// --------------------------------------------------------------------
+// BspLevel definition
+// --------------------------------------------------------------------
 pub struct BspLevel {
-    doc: Arc<Document>,  // Keep a reference to the Document.
-    root: Arc<RwLock<Option<Arc<BspNode>>>>,
-    subsectors: Arc<RwLock<Vec<Arc<Subsector>>>>, // Store subsectors
-    blocks: Arc<RwLock<Block>>,    // Store the blockmap
-    segs: Arc<RwLock<Vec<Arc<Seg>>>>,    // Store all generated segs
+    /// The entire map Document, wrapped in Arc<RwLock>.
+    pub doc: Arc<RwLock<Document>>,
+
+    /// The root BSP node (if built).
+    pub root: Arc<RwLock<Option<Arc<BspNode>>>>,
+
+    /// The list of final subsectors in this BSP.
+    pub subsectors: Arc<RwLock<Vec<Arc<Subsector>>>>,
+
+    /// The blockmap, if you’re using it for collision or other logic.
+    pub blocks: Arc<RwLock<Block>>,
+
+    /// The list of all Segs built from the Document’s linedefs.
+    pub segs: Arc<RwLock<Vec<Arc<Seg>>>>,
 }
 
 impl BspLevel {
-    pub fn new(doc: Arc<Document>) -> Self {
-        let bounds = Self::compute_map_bounds(&doc);  // Compute the bounds *once*.
-        let block = Block::new(bounds);      // Create a new Block
+    /// Create a new BspLevel from an Arc<RwLock<Document>>.
+    pub fn new(doc: Arc<RwLock<Document>>) -> Self {
+        let bounds = Self::compute_map_bounds(&doc);
+        let blockmap = Block::new(bounds);
+
         BspLevel {
             doc,
             root: Arc::new(RwLock::new(None)),
             subsectors: Arc::new(RwLock::new(Vec::new())),
-            blocks: Arc::new(RwLock::new(block)),          // Initialize with empty blockmap
-            segs: Arc::new(RwLock::new(Vec::new())),         // Initialize with empty segs
+            blocks: Arc::new(RwLock::new(blockmap)),
+            segs: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
+    /// High-level “build” method that:
+    /// 1) Creates initial segs from linedefs,
+    /// 2) Builds the BSP tree,
+    /// 3) Builds the blockmap,
+    /// 4) Processes subsectors.
     pub fn build(&self) -> Result<(), String> {
-        // 1. Create initial Segs from Linedefs.
-        let initial_segs = self.create_initial_segs()?;
+        let initial = self.create_initial_segs()?;
+        let root_node = self.build_bsp_tree(initial, 0)?;
+        *self.root.write() = Some(Arc::new(root_node));
 
-        // 2. Build the BSP tree recursively.
-        let root = self.build_bsp_tree(initial_segs, 0)?;
-        *self.root.write() = Some(Arc::new(root));
-
-        // 3. Build the blockmap (optional, for optimization).
         self.build_blockmap()?;
-
-        // 4. Process subsectors (for rendering).
         self.process_subsectors()?;
 
         Ok(())
     }
 
+    // ----------------------------------------------------------------
+    // Step 1: create initial segs from linedefs
+    // ----------------------------------------------------------------
     fn create_initial_segs(&self) -> Result<Vec<Arc<Seg>>, String> {
-        let linedefs = self.doc.linedefs().read();
-        let vertices = self.doc.vertices().read();
+        // NOTE: You said your Document has some .vertices() and .linedefs() accessors;
+        // adjust to your actual code. This is just a placeholder pattern:
 
-        let mut segs = Vec::with_capacity(linedefs.len() * 2);
+        let doc_guard = self.doc.read();
 
-        for linedef in linedefs.iter() {
-            let start = vertices.get(linedef.start).ok_or(format!("Invalid start vertex index: {}", linedef.start))?;
-            let end = vertices.get(linedef.end).ok_or(format!("Invalid end vertex index: {}", linedef.end))?;
+        // Assuming doc_guard.linedefs is an Arc<RwLock<Vec<Arc<LineDef>>>>,
+        // acquire a read lock to access the Vec.
+        let linedefs_ref = doc_guard.linedefs.read();
+        let vertices_ref = doc_guard.vertices.read();
 
-            // Create front side seg (if the linedef has a right side)
+        let mut seglist = Vec::with_capacity(linedefs_ref.len() * 2);
+
+        for linedef in linedefs_ref.iter() {
+            let start_v = vertices_ref
+                .get(linedef.start)
+                .ok_or_else(|| format!("Invalid start vertex {}", linedef.start))?;
+            let end_v = vertices_ref
+                .get(linedef.end)
+                .ok_or_else(|| format!("Invalid end vertex {}", linedef.end))?;
+
+            // front seg
             if linedef.right >= 0 {
-                segs.push(Arc::new(Seg {
-                    start: Point2D::new(start.raw_x as f64, start.raw_y as f64),
-                    end: Point2D::new(end.raw_x as f64, end.raw_y as f64),
-                    angle: Self::compute_angle(&start, &end),
-                    length: Self::compute_length(&start, &end),
-                    linedef: Some(linedef.clone()),
+                let seg_arc = Arc::new(Seg {
+                    start: Point2D::new(start_v.raw_x as f64, start_v.raw_y as f64),
+                    end: Point2D::new(end_v.raw_x as f64, end_v.raw_y as f64),
+                    angle: Self::compute_angle(start_v, end_v),
+                    length: Self::compute_length(start_v, end_v),
+                    linedef: Some(linedef.clone()), // if linedef is Arc<LineDef>, else wrap
                     side: SegmentSide::Front,
-                    partner: None, // Filled in later
-                }));
+                    partner: None,
+                });
+                seglist.push(seg_arc);
             }
 
-            // Create back side seg (if the linedef has a left side)
+            // back seg
             if linedef.left >= 0 {
-                segs.push(Arc::new(Seg {
-                    start: Point2D::new(end.raw_x as f64, end.raw_y as f64),
-                    end: Point2D::new(start.raw_x as f64, start.raw_y as f64),
-                    angle: Self::compute_angle(&end, &start), // Corrected call
-                    length: Self::compute_length(&end, &start), // Corrected call
+                let seg_arc = Arc::new(Seg {
+                    start: Point2D::new(end_v.raw_x as f64, end_v.raw_y as f64),
+                    end: Point2D::new(start_v.raw_x as f64, start_v.raw_y as f64),
+                    angle: Self::compute_angle(end_v, start_v),
+                    length: Self::compute_length(end_v, start_v),
                     linedef: Some(linedef.clone()),
                     side: SegmentSide::Back,
-                    partner: None, // Filled in later
-                }));
+                    partner: None,
+                });
+                seglist.push(seg_arc);
             }
         }
 
-        self.link_partner_segs(&segs);
-        Ok(segs)
+        self.link_partner_segs(&seglist);
+        Ok(seglist)
     }
 
-
+    /// For any linedef that’s two-sided, link the front/back seg so each has `partner`.
     fn link_partner_segs(&self, segs: &[Arc<Seg>]) {
         for i in 0..segs.len() {
-            for j in i + 1..segs.len() {
-                if let (Some(linedef_i), Some(linedef_j)) = (&segs[i].linedef, &segs[j].linedef) {
-                    if Arc::ptr_eq(linedef_i, linedef_j) && segs[i].side != segs[j].side {
-                        // Use let bindings to create a longer lived value
-                        let mut seg_i_clone = segs[i].as_ref().clone();
-                        let mut seg_j_clone = segs[j].as_ref().clone();
-                        seg_i_clone.partner = Some(Arc::new(seg_j_clone.clone()));
-                        seg_j_clone.partner = Some(Arc::new(seg_i_clone.clone()));
+            for j in (i + 1)..segs.len() {
+                // If they share the same linedef pointer & different sides, they are front/back pairs
+                if let (Some(ld_i), Some(ld_j)) = (&segs[i].linedef, &segs[j].linedef) {
+                    // pointer-equality check
+                    if Arc::ptr_eq(ld_i, ld_j) && segs[i].side != segs[j].side {
+                        // Link them
+                        // 1) Make a local clone of each seg Arc
+                        let seg_i = segs[i].clone();
+                        let seg_j = segs[j].clone();
 
-                        // Now use make_mut with the clones
-                        let seg_i_mut = Arc::make_mut(&mut segs[i].clone());
-                        *seg_i_mut = seg_i_clone;
-                        let seg_j_mut = Arc::make_mut(&mut segs[j].clone());
-                        *seg_j_mut = seg_j_clone;
+                        // 2) Mutate each seg’s `partner` field in-place. Because these are plain Arc<Seg>,
+                        //    we either re-construct a new seg or mutate with a "get_mut if unique".
+                        //    If you expect multiple references, consider a different approach (like interior mutability).
+                        if let Some(i_mut) = Arc::get_mut(&mut (segs[i].clone())) {
+                            i_mut.partner = Some(seg_j.clone());
+                        }
+                        if let Some(j_mut) = Arc::get_mut(&mut (segs[j].clone())) {
+                            j_mut.partner = Some(seg_i.clone());
+                        }
                     }
                 }
             }
         }
     }
 
-
+    // ----------------------------------------------------------------
+    // Step 2: recursively build the BSP
+    // ----------------------------------------------------------------
     fn build_bsp_tree(&self, segs: Vec<Arc<Seg>>, depth: i32) -> Result<BspNode, String> {
         if depth >= BSP_DEPTH_LIMIT {
-            return Err("BSP tree depth limit exceeded".into());
+            return Err("Reached BSP depth limit".into());
         }
-
         if segs.is_empty() {
             return Ok(BspNode::empty_leaf());
         }
-
         if segs.len() <= 3 {
             return Ok(BspNode::create_leaf(segs));
         }
 
         let partition = self.choose_partition(&segs)?;
-        let (mut front_segs, mut back_segs, spanning_segs) = self.split_segs(&segs, &partition)?;
+        let (mut front_list, mut back_list, spanning) = self.split_list(&segs, &partition)?;
 
-        for seg in spanning_segs {
-            let (front_seg, back_seg) = self.split_seg(&seg, &partition)?;
-            if let Some(s) = front_seg {
-                front_segs.push(Arc::new(s));
+        for seg in spanning {
+            let (f_seg, b_seg) = self.split_seg(&seg, &partition)?;
+            if let Some(s) = f_seg {
+                front_list.push(Arc::new(s));
             }
-            if let Some(s) = back_seg {
-                back_segs.push(Arc::new(s));
+            if let Some(s) = b_seg {
+                back_list.push(Arc::new(s));
             }
         }
 
-        let front = self.build_bsp_tree(front_segs, depth + 1)?;
-        let back = self.build_bsp_tree(back_segs, depth + 1)?;
+        let front_node = self.build_bsp_tree(front_list, depth + 1)?;
+        let back_node = self.build_bsp_tree(back_list, depth + 1)?;
 
-        Ok(BspNode::create_node(
-            partition,
-            front,
-            back,
-            self.compute_node_bbox(&segs)
-        ))
+        let node_bbox = self.compute_node_bbox(&segs);
+        let node = BspNode::create_node(partition, front_node, back_node, node_bbox);
+        Ok(node)
     }
 
     fn choose_partition(&self, segs: &[Arc<Seg>]) -> Result<Line2D, String> {
-        if let Some(seg) = segs.first() {
-            Ok(Line2D::from_seg(seg))
-        } else {
-            Err("No segs to partition!".into())
+        if segs.is_empty() {
+            return Err("No segs to partition".into());
         }
+        Ok(Line2D::from_seg(&segs[0]))
     }
 
-    fn split_segs(&self, segs: &[Arc<Seg>], partition: &Line2D) -> Result<(Vec<Arc<Seg>>, Vec<Arc<Seg>>, Vec<Arc<Seg>>), String> {
-        let mut front_segs = Vec::new();
-        let mut back_segs = Vec::new();
-        let mut spanning_segs = Vec::new();
+    fn split_list(
+        &self,
+        segs: &[Arc<Seg>],
+        part: &Line2D,
+    ) -> Result<(Vec<Arc<Seg>>, Vec<Arc<Seg>>, Vec<Arc<Seg>>), String> {
+        let mut front = Vec::new();
+        let mut back = Vec::new();
+        let mut span = Vec::new();
 
         for seg in segs {
-            match self.classify_seg_against_partition(seg, partition) {
-                SegPosition::Front => front_segs.push(seg.clone()),
-                SegPosition::Back => back_segs.push(seg.clone()),
-                SegPosition::Spanning => spanning_segs.push(seg.clone()),
+            match self.classify_seg(seg, part) {
+                SegPosition::Front => front.push(seg.clone()),
+                SegPosition::Back => back.push(seg.clone()),
+                SegPosition::Spanning => span.push(seg.clone()),
                 SegPosition::Coincident => {
-                    front_segs.push(seg.clone());
-                    back_segs.push(seg.clone());
+                    front.push(seg.clone());
+                    back.push(seg.clone());
                 }
             }
         }
-        Ok((front_segs, back_segs, spanning_segs))
+        Ok((front, back, span))
     }
 
-    fn classify_seg_against_partition(&self, seg: &Seg, partition: &Line2D) -> SegPosition {
-        let start_side = partition.classify_point(&seg.start);
-        let end_side = partition.classify_point(&seg.end);
+    fn classify_seg(&self, seg: &Seg, line: &Line2D) -> SegPosition {
+        let side_a = line.classify_point(&seg.start);
+        let side_b = line.classify_point(&seg.end);
 
-        if start_side > EPSILON {
-            if end_side > EPSILON {
-                SegPosition::Front
-            } else if end_side < -EPSILON {
-                SegPosition::Spanning
-            } else {
-                SegPosition::Front
-            }
-        } else if start_side < -EPSILON {
-            if end_side < -EPSILON {
-                SegPosition::Back
-            } else if end_side > EPSILON {
-                SegPosition::Spanning
-            } else {
-                SegPosition::Back
-            }
-        } else { // start_side == 0.0 (within epsilon)
-            if end_side > EPSILON {
-                SegPosition::Front
-            } else if end_side < -EPSILON{
-                SegPosition::Back
-            } else{
-                SegPosition::Coincident
-            }
+        if side_a > EPSILON && side_b > EPSILON {
+            SegPosition::Front
+        } else if side_a < -EPSILON && side_b < -EPSILON {
+            SegPosition::Back
+        } else if (side_a > EPSILON && side_b < -EPSILON)
+            || (side_a < -EPSILON && side_b > EPSILON)
+        {
+            SegPosition::Spanning
+        } else {
+            SegPosition::Coincident
         }
     }
-    
-    // This method splits a seg and returns two new segs
-    fn split_seg(&self, seg: &Seg, partition: &Line2D) -> Result<(Option<Seg>, Option<Seg>), String> {
-        if let Some(intersection) = partition.intersect(&Line2D::from_seg(seg)){
-            let front_seg = Seg{
-                start: seg.start,
-                end: intersection,
-                angle: 0.0, //To compute
-                length: 0.0, //To compute
-                linedef: seg.linedef.clone(),
-                side: seg.side,
-                partner: None
-            };
 
-            let back_seg = Seg{
-                start: intersection,
-                end: seg.end,
-                angle: 0.0, //To compute
-                length: 0.0, //To compute
+    fn split_seg(&self, seg: &Seg, line: &Line2D) -> Result<(Option<Seg>, Option<Seg>), String> {
+        let seg_line = Line2D::from_seg(seg);
+        if let Some(intersect) = line.intersect(&seg_line) {
+            let front_seg = Seg {
+                start: seg.start,
+                end: intersect,
+                angle: 0.0,  // you could recalc if needed
+                length: 0.0, // recalc if needed
                 linedef: seg.linedef.clone(),
                 side: seg.side,
-                partner: None
+                partner: None,
+            };
+            let back_seg = Seg {
+                start: intersect,
+                end: seg.end,
+                angle: 0.0,
+                length: 0.0,
+                linedef: seg.linedef.clone(),
+                side: seg.side,
+                partner: None,
             };
             Ok((Some(front_seg), Some(back_seg)))
-        } else{
-            Err("The segment intersects the partition line in more than one point".to_string())
+        } else {
+            // might be parallel or have no single intersection
+            Err("Cannot split seg: no single intersection found".into())
         }
     }
-    
 
-    // Placeholder:  Compute the bounding box of a set of segs.
     fn compute_node_bbox(&self, segs: &[Arc<Seg>]) -> BoundingBox {
         BoundingBox::from_segs(segs)
     }
-    // Placeholder: Build the blockmap
+
+    // ----------------------------------------------------------------
+    // (Optional) reorder the segs by some criterion
+    // ----------------------------------------------------------------
+    pub fn reorder_segs(&mut self) {
+        let mut segs_guard = self.segs.write();
+
+        // EXAMPLE: sort by the start.x coordinate, then start.y
+        // or if you want to sort by linedef "id", you must have `linedef.id`.
+        segs_guard.sort_by(|a, b| {
+            let a_read = a.as_ref();
+            let b_read = b.as_ref();
+            // For example, sort by start.x then start.y
+            let ord_x = a_read.start.x.partial_cmp(&b_read.start.x).unwrap_or(std::cmp::Ordering::Equal);
+            if ord_x != std::cmp::Ordering::Equal {
+                ord_x
+            } else {
+                // fallback to comparing y
+                a_read.start.y.partial_cmp(&b_read.start.y).unwrap_or(std::cmp::Ordering::Equal)
+            }
+        });
+    }
+
+    // ----------------------------------------------------------------
+    // Step 3: Build blockmap
+    // ----------------------------------------------------------------
     fn build_blockmap(&self) -> Result<(), String> {
-        // TODO: Implement blockmap generation
+        // TODO if desired
         Ok(())
     }
 
-    // Placeholder: Process subsectors (for rendering)
+    // ----------------------------------------------------------------
+    // Step 4: Process subsectors
+    // ----------------------------------------------------------------
     fn process_subsectors(&self) -> Result<(), String> {
-      // TODO: Implement after implementing BSP Tree.
-      Ok(())
+        // TODO if desired
+        Ok(())
     }
 
-    // Placeholder: Compute subsector bbox
-    fn compute_subsector_bbox(&self, _segs: &[Arc<Seg>]) -> BoundingBox{
-        // TODO: Implement after implementing BSP Tree and subsectors.
-        BoundingBox::default()
-    }
-    
-    fn determine_subsector_sector(&self, _segs: &[Arc<Seg>]) -> Option<Arc<Sector>>{
-        None
-    }
-
-    // Provided helper methods (corrected to use references)
-    fn compute_angle(start: &Vertex, end: &Vertex) -> f64 {
-        let dx = (end.raw_x - start.raw_x) as f64;
-        let dy = (end.raw_y - start.raw_y) as f64;
+    // ----------------------------------------------------------------
+    // Some utility fns
+    // ----------------------------------------------------------------
+    fn compute_angle(a: &Vertex, b: &Vertex) -> f64 {
+        let dx = (b.raw_x - a.raw_x) as f64;
+        let dy = (b.raw_y - a.raw_y) as f64;
         dy.atan2(dx)
     }
 
-    fn compute_length(start: &Vertex, end: &Vertex) -> f64 {
-        let dx = (end.raw_x - start.raw_x) as f64;
-        let dy = (end.raw_y - start.raw_y) as f64;
+    fn compute_length(a: &Vertex, b: &Vertex) -> f64 {
+        let dx = (b.raw_x - a.raw_x) as f64;
+        let dy = (b.raw_y - a.raw_y) as f64;
         dx.hypot(dy)
     }
 
-    fn compute_map_bounds(doc: &Document) -> BoundingBox {
-      // Use a let binding to ensure the temporary value lives long enough
-        let binding = doc.vertices();
-        let vertices = binding.read();
-        let mut bounds = BoundingBox::new_empty();
-
-        for vertex in vertices.iter() {
-            bounds.expand_point(vertex.raw_x as f64, vertex.raw_y as f64);
+    fn compute_map_bounds(doc_ref: &Arc<RwLock<Document>>) -> BoundingBox {
+        let doc = doc_ref.read();
+        // If doc has `vertices` as an Arc<RwLock<Vec<Arc<Vertex>>>>, first acquire a read lock.
+        let mut bb = BoundingBox::new_empty();
+        let vertices_ref = doc.vertices.read();
+        for v in vertices_ref.iter() {
+            bb.expand_point(v.raw_x as f64, v.raw_y as f64);
         }
-
-        bounds
+        bb
     }
-}
+} 

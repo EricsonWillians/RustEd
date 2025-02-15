@@ -1,13 +1,16 @@
-// src/bsp/mod.rs
-
+// src/bsp/mod.rs (CORRECTED)
 pub mod bsp_level;
 pub mod bsp_node;
 mod bsp_procedural; // Not public, used internally
 mod bsp_util; // Not public, used internally
 pub mod debug_viz; // Make it public
-pub use bsp_level::{BspLevel, Seg, Block, SegmentSide}; // Export Seg and Block
+pub use bsp_level::{BspLevel, Block}; // Export Seg and Block
 pub use bsp_node::BspNode;
 pub use bsp_util::{Line2D, Point2D, BoundingBox}; // Re-export geometry types
+pub use bsp_level::Seg;
+pub use bsp_level::SegmentSide;
+pub use bsp_level::Subsector;
+
 
 
 // Constants (consider putting these in a separate config module)

@@ -1,6 +1,10 @@
+// src/ui/editor_ui.rs
+
 use eframe::egui;
 
 use crate::editor::instance::Instance;
+use crate::document::Document;
+use parking_lot::RwLock;
 
 impl Instance {
     pub fn show_debug_window(&mut self, ctx: &egui::Context) {
@@ -23,10 +27,12 @@ impl Instance {
 
     fn generate_test_map(&mut self) {
         // Create a simple test map for debugging
-        use crate::document::{Document, Vertex, LineDef};
+        use crate::document::{Vertex, LineDef};
         use std::sync::Arc;
+        
+        let document = Arc::new(RwLock::new(Document::new()));
 
-        let mut doc = Document::new();
+        let bsp = Arc::new(crate::bsp::BspLevel::new(document.clone()));
         
         // Add some test vertices
         let vertices = vec![
@@ -37,7 +43,7 @@ impl Instance {
         ];
 
         for vertex in vertices {
-            doc.vertices().write().push(Arc::new(vertex));
+            document.write().vertices.write().push(Arc::new(vertex));
         }
 
         // Add test linedefs to form a square
@@ -81,12 +87,10 @@ impl Instance {
         ];
 
         for linedef in linedefs {
-            doc.linedefs().write().push(Arc::new(linedef));
+            document.write().linedefs.write().push(Arc::new(linedef));
         }
 
         // Create BSP tree from test map
-        let doc = Arc::new(doc);
-        let bsp = Arc::new(crate::bsp::BspLevel::new(doc.clone()));
         bsp.build().expect("Failed to build BSP tree");
         self.bsp_level = Some(bsp);
     }

@@ -1,20 +1,20 @@
-// src/ui/main_window.rs
-
-use crate::bsp::debug_viz::BspDebugger;
-use crate::editor::objects::Selection;
-
-use eframe::egui::{self, Context, Sense}; //Remove unused imports
-use log::{info, error};
 use std::sync::Arc;
+
+use eframe::egui::{self, Context, Sense, Vec2};
+use log::{info, error};
 use parking_lot::RwLock;
+use crate::editor::commands::{Command, CommandType};
 
-use crate::document::Document;
+use crate::editor::objects::EditObject;
+use crate::editor::Selection; 
+use crate::{
+    bsp::debug_viz::BspDebugger,
+    document::Document,
+    editor::{Editor, Tool},
+    ui::{DialogManager, Theme},
+};
 
-//use crate::document::Document; // No longer directly using Document here
-use crate::editor::{Editor, Tool, Command};
-use crate::ui::{DialogManager, Theme};
-
-/// MainWindow configuration settings (remains unchanged)
+/// MainWindow configuration settings
 #[derive(Clone, Debug)]
 pub struct WindowConfig {
     pub default_width: u32,
@@ -35,13 +35,12 @@ impl Default for WindowConfig {
         }
     }
 }
-
 /// Application window state and UI management
 pub struct MainWindow {
     // Core state
     config: WindowConfig,
-    editor: Arc<RwLock<Editor>>, // Now holds the Editor, not EditorState
-    dialog_manager: DialogManager, // You'll implement this later
+    editor: Arc<RwLock<Editor>>,
+    dialog_manager: DialogManager,
 
     // Debug tools
     bsp_debugger: BspDebugger,
@@ -50,7 +49,6 @@ pub struct MainWindow {
     // UI state
     show_side_panel: bool,
     side_panel_width: f32,
-    //tool_windows: ToolWindowManager, // You'll implement this later.
     status_message: String,
     error_message: Option<String>,
 }
@@ -58,68 +56,77 @@ pub struct MainWindow {
 impl MainWindow {
     /// Creates a new MainWindow with the given configuration
     pub fn new(config: WindowConfig) -> Self {
-        info!("Initializing main window {}x{}", config.default_width, config.default_height);
-        let doc = Arc::new(Document::new());
+        info!(
+            "Initializing main window {}x{}",
+            config.default_width, config.default_height
+        );
+
+        // 1) Create an Arc<RwLock<Document>>
+        let doc = Arc::new(RwLock::new(Document::new()));
+
+        // 2) Create Editor with that Document, also Arc<RwLock>
+        let editor = Arc::new(RwLock::new(Editor::new(doc)));
+
+        // 3) Build the MainWindow
         Self {
             config: config.clone(),
-            editor: Arc::new(RwLock::new(Editor::new(Arc::clone(&doc)))),
+            editor,
             dialog_manager: DialogManager::new(),
             bsp_debugger: BspDebugger::new(),
             show_bsp_debug: false,
             show_side_panel: true,
             side_panel_width: 250.0,
-            //tool_windows: ToolWindowManager::new(),  // You'll implement this later
             status_message: String::new(),
             error_message: None,
         }
     }
 
     /// Main UI update loop
-    pub fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+    pub fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
         self.handle_input(ctx);
-        self.update_layout(ctx, _frame); //Keep the _frame, although unused
-        //self.process_commands(); // No longer needed, commands are handled directly
+        self.update_layout(ctx, frame);
     }
 
-    /// Handles keyboard and mouse input
+    // ------------------------------------------------------------------------
+    // Input Handling
+    // ------------------------------------------------------------------------
     fn handle_input(&mut self, ctx: &Context) {
         let input = ctx.input();
 
-        // Global keyboard shortcuts
+        // Example: toggle the BSP debug window with F11
         if input.key_pressed(egui::Key::F11) {
             self.show_bsp_debug = !self.show_bsp_debug;
         }
 
-        // Handle editor commands (using the new Command system)
+        // Cancel current operation with ESC
         if input.key_pressed(egui::Key::Escape) {
-            if let Ok(mut editor) = self.editor.write() {
-                editor.cancel_current_operation();
-            }
+            // NOTE: parking_lot::RwLock::write() never errors, so no match needed
+            let mut editor = self.editor.write();
+            editor.cancel_current_operation();
         }
 
-        // Example:  Add a vertex with Ctrl+A (or Cmd+A on macOS)
+        // Example: Ctrl + A = add a vertex (just a demonstration)
         if input.modifiers.ctrl || input.modifiers.mac_cmd {
             if input.key_pressed(egui::Key::A) {
-                if let Ok(mut editor) = self.editor.write() {
-                    // Get the mouse position in screen coordinates
-                    if let Some(pos) = input.pointer.hover_pos() {
-                      // Convert the screen coordinates to the world coordinates
-                      let world_pos = self.screen_to_world(pos);
-                      // Create the AddVertex Command
-                      let add_vertex_command = Command::AddVertex{
+                let mut editor = self.editor.write();
+                if let Some(pos) = input.pointer.hover_pos() {
+                    let world_pos = self.screen_to_world(pos);
+
+                    let cmd = CommandType::AddVertex {
                         x: world_pos.x as i32,
                         y: world_pos.y as i32,
-                        vertex_id: None
-                      };
-                      // Execute
-                      editor.execute_command(add_vertex_command);
-                    }
+                        vertex_id: None,
+                    };
+                    // Editor::execute_command expects Box<dyn Command> or similar
+                    editor.execute_command(Box::new(cmd) as Box<dyn Command>);
                 }
             }
         }
     }
 
-    /// Updates the complete UI layout
+    // ------------------------------------------------------------------------
+    // Overall Layout
+    // ------------------------------------------------------------------------
     fn update_layout(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
         self.update_menu_bar(ctx);
         self.update_side_panel(ctx);
@@ -127,22 +134,23 @@ impl MainWindow {
         self.update_status_bar(ctx);
         self.update_dialogs(ctx);
 
-        // Show BSP debug window if enabled
         if self.show_bsp_debug {
             self.show_bsp_debug_window(ctx);
         }
 
-        // Show error message if any
         if let Some(error) = &self.error_message {
-            self.show_error_dialog(ctx, error);
+            let error_clone = error.clone();
+            self.show_error_dialog(ctx, &error_clone);
         }
     }
 
-      /// Updates the top menu bar
+    // ------------------------------------------------------------------------
+    // Menu Bar
+    // ------------------------------------------------------------------------
     fn update_menu_bar(&mut self, ctx: &Context) {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
-                // File menu
+                // FILE menu
                 ui.menu_button("File", |ui| {
                     if ui.button("New").clicked() {
                         self.new_document();
@@ -159,7 +167,7 @@ impl MainWindow {
                     }
                 });
 
-                // Edit menu
+                // EDIT menu
                 ui.menu_button("Edit", |ui| {
                     if ui.button("Undo").clicked() {
                         self.undo();
@@ -169,13 +177,13 @@ impl MainWindow {
                     }
                 });
 
-                // View menu
+                // VIEW menu
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_side_panel, "Tools Panel");
                     ui.checkbox(&mut self.show_bsp_debug, "BSP Debug");
                 });
 
-                // Tools menu
+                // TOOLS menu
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Build Nodes").clicked() {
                         self.build_nodes();
@@ -185,7 +193,7 @@ impl MainWindow {
                     }
                 });
 
-                // Help menu
+                // HELP menu
                 ui.menu_button("Help", |ui| {
                     if ui.button("About...").clicked() {
                         self.show_about_dialog();
@@ -195,7 +203,9 @@ impl MainWindow {
         });
     }
 
-    /// Updates the side tool panel
+    // ------------------------------------------------------------------------
+    // Left Side Tools Panel
+    // ------------------------------------------------------------------------
     fn update_side_panel(&mut self, ctx: &Context) {
         if !self.show_side_panel {
             return;
@@ -206,46 +216,56 @@ impl MainWindow {
             .resizable(true)
             .show(ctx, |ui| {
                 ui.heading("Tools");
-                
-                // !! Access the Editor directly, not EditorState
-                let editor = self.editor.read();  
+
+                let editor = self.editor.read();
                 for tool in editor.available_tools() {
-                    let selected = editor.current_tool() == *tool; // Compare directly
+                    let selected = editor.current_tool() == *tool;
                     if ui.selectable_label(selected, tool.name()).clicked() {
-                        drop(editor); // Explicitly drop the read lock
-                        self.select_tool(*tool);  // Pass the Tool enum, not an Option
+                        // We must drop 'editor' before writing again
+                        drop(editor);
+                        self.select_tool(*tool);
+                        return;
                     }
                 }
 
                 ui.separator();
                 ui.heading("Properties");
-                if let Some(obj) = editor.selected_object() {
-                    self.show_property_editor(ui, obj.clone()); //Pass the Selection
+
+                if let Some(selection) = editor.selected_object() {
+                    // Now we correctly match against the Selection enum.
+                    let edit_obj = match selection {
+                        Selection::Vertex(idx) => EditObject::Vertex(*idx),
+                        Selection::Line(idx) => EditObject::LineDef(*idx),
+                        Selection::Sector(idx) => EditObject::Sector(*idx),
+                        Selection::Thing(idx) => EditObject::Thing(*idx),
+                    };
+                    drop(editor);
+                    self.show_property_editor(ui, edit_obj);
                 } else {
                     ui.label("No object selected");
                 }
             });
     }
-    /// Updates the central editor area
+    
+    // ------------------------------------------------------------------------
+    // Central Area
+    // ------------------------------------------------------------------------
     fn update_central_area(&mut self, ctx: &Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Create a full-size canvas
-            let (response, painter) = ui.allocate_painter(
-                ui.available_size(),
-                Sense::click_and_drag()
-            );
+            let (response, painter) =
+                ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
 
             let editor = self.editor.read();
 
-            // Draw grid
+            // Some optional background grid or something
             self.draw_editor_grid(&painter, response.rect);
 
-            // Draw map geometry. No need to wrap the document in an Arc and RwLock again.
-            if let Some(doc) = editor.document() {
-                self.draw_map_geometry(&painter, doc.clone(), response.rect);
+            // Draw the actual Document’s geometry if present
+            if let Some(doc_arc) = editor.document() {
+                self.draw_map_geometry(&painter, doc_arc, response.rect);
             }
 
-            // Handle input
+            // If user clicks, handle it
             if response.clicked() {
                 if let Some(pos) = response.interact_pointer_pos() {
                     self.handle_editor_click(pos);
@@ -254,165 +274,188 @@ impl MainWindow {
         });
     }
 
-    /// Updates the status bar
+    // ------------------------------------------------------------------------
+    // Status Bar
+    // ------------------------------------------------------------------------
     fn update_status_bar(&mut self, ctx: &Context) {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            let coord_label = if let Some(pos) = ui.input().pointer.hover_pos() {
+                let world_pos = self.screen_to_world(pos);
+                format!("({}, {})", world_pos.x as i32, world_pos.y as i32)
+            } else {
+                String::new()
+            };
+
             ui.horizontal(|ui| {
                 ui.label(&self.status_message);
+                ui.label(coord_label);
 
-                // Show coordinates if hovering over editor
-                if let Some(pos) = ui.input().pointer.hover_pos() {
-                    let world_pos = self.screen_to_world(pos);
-                    ui.label(format!("({}, {})", world_pos.x as i32, world_pos.y as i32));
-                }
-
-                // Show current tool. No longer needs try_read, as we use the editor.
-                let editor = self.editor.read(); // Keep this lock as short as possible
-                if let Some(tool) = Some(editor.current_tool()) { // Directly get the tool
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(format!("Tool: {}", tool.name()));
-                    });
-                }
+                let editor = self.editor.read();
+                // Show current tool on the right side
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(format!("Tool: {}", editor.current_tool().name()));
+                });
             });
         });
     }
 
-    /// Shows the BSP debug window
+    // ------------------------------------------------------------------------
+    // BSP Debug Window
+    // ------------------------------------------------------------------------
     fn show_bsp_debug_window(&mut self, ctx: &Context) {
         egui::Window::new("BSP Debug")
             .resizable(true)
-            .default_size([800.0, 600.0])
+            .default_size(Vec2::new(800.0, 600.0))
             .show(ctx, |ui| {
-                // Access the BSP tree through the editor
-                let editor = self.editor.read(); // Get a read lock on the editor
-                if let Some(bsp) = editor.bsp_tree() { // Use the bsp_tree() method
-                    self.bsp_debugger.show(ui, &bsp); // Pass the Arc<BspLevel>
+                let editor = self.editor.read();
+                if let Some(bsp) = editor.bsp_tree() {
+                    self.bsp_debugger.show(ui, &bsp);
                 } else {
                     ui.label("No BSP data available.");
+                    // Quick button to generate a test map
                     if ui.button("Generate Test Map").clicked() {
-                        drop(editor); // Drop the read lock *before* calling generate_test_map
-                        self.generate_test_map(); // Call generate_test_map on self (MainWindow)
+                        drop(editor);
+                        self.generate_test_map();
                     }
                 }
             });
     }
 
-    // Command handlers (now use the Editor's methods)
+    // ------------------------------------------------------------------------
+    // Commands & Actions
+    // ------------------------------------------------------------------------
     fn new_document(&mut self) {
-        if let Ok(mut editor) = self.editor.write() {
-            if editor.has_unsaved_changes() {
-                self.dialog_manager.show_save_changes_dialog(); // You'll implement this later
-                return;
-            }
-            // In a real implementation, you'd create a new document here.
-            // editor.new_document(); // You don't have a new_document() method on Editor
-            self.status_message = "Created new document".to_string(); // Update status
+        // No lock errors with parking_lot
+        let mut editor = self.editor.write();
+
+        // Example: check if unsaved
+        if editor.has_unsaved_changes() {
+            self.dialog_manager.show_save_changes_dialog();
+            return;
         }
+        // Actually create a new document if you have a method for that:
+        // editor.new_document();
+        self.status_message = "Created new document".to_string();
     }
 
-
     fn save_document(&mut self) {
-        if let Ok(mut editor) = self.editor.write() {
-            match editor.save_document() {
-                Ok(_) => self.status_message = "Document saved".to_string(),
-                Err(e) => {
-                    error!("Failed to save document: {}", e);
-                    self.error_message = Some(format!("Failed to save: {}", e));
-                }
+        let mut editor = self.editor.write();
+        match editor.save_document() {
+            Ok(_) => self.status_message = "Document saved".to_string(),
+            Err(e) => {
+                error!("Failed to save document: {}", e);
+                self.error_message = Some(format!("Failed to save: {}", e));
             }
         }
     }
 
     fn build_nodes(&mut self) {
-        if let Ok(mut editor) = self.editor.write() {
-            match editor.build_nodes() {
-                Ok(_) => {
-                    self.status_message = "BSP nodes built successfully".to_string();
-                    self.show_bsp_debug = true; // Show debug window
-                }
-                Err(e) => {
-                    error!("Failed to build nodes: {}", e);
-                    self.error_message = Some(format!("Node building failed: {}", e));
-                }
+        let mut editor = self.editor.write();
+        match editor.build_nodes() {
+            Ok(_) => {
+                self.status_message = "BSP nodes built successfully".to_string();
+                self.show_bsp_debug = true;
+            }
+            Err(e) => {
+                error!("Failed to build nodes: {}", e);
+                self.error_message = Some(format!("Node building failed: {}", e));
             }
         }
     }
 
-    // Helper methods
     fn generate_test_map(&mut self) {
-        if let Ok(mut editor) = self.editor.write() {
-            editor.generate_test_map();
-            self.status_message = "Generated test map".to_string();
-            // No longer need to call build_nodes here, it's done inside generate_test_map
-        }
+        let mut editor = self.editor.write();
+        editor.generate_test_map(); // This calls build_nodes() internally
+        self.status_message = "Generated test map".to_string();
     }
 
     fn select_tool(&mut self, tool: Tool) {
-        if let Ok(mut editor) = self.editor.write() {
-            editor.set_current_tool(tool);
-            self.status_message = format!("Selected tool: {}", tool.name());
-        }
-    }
-
-
-    fn screen_to_world(&self, screen_pos: egui::Pos2) -> egui::Pos2 {
-        // TODO: Implement proper coordinate transformation (using zoom and pan)
-        screen_pos
+        let mut editor = self.editor.write();
+        editor.set_current_tool(tool);
+        self.status_message = format!("Selected tool: {}", tool.name());
     }
 
     fn undo(&mut self) {
-        if let Ok(mut editor) = self.editor.write() {
-            editor.undo();
-        }
+        let mut editor = self.editor.write();
+        editor.undo();
     }
 
     fn redo(&mut self) {
-        if let Ok(mut editor) = self.editor.write() {
-            editor.redo();
-        }
+        let mut editor = self.editor.write();
+        editor.redo();
     }
 
-    // --- Placeholder methods (to be implemented later) ---
+    // ------------------------------------------------------------------------
+    // Misc Utility
+    // ------------------------------------------------------------------------
+    fn screen_to_world(&self, screen_pos: egui::Pos2) -> egui::Pos2 {
+        // If you had a camera / zoom, you'd transform it here
+        screen_pos
+    }
+
+    // Stub property editor
+    fn show_property_editor(&mut self, ui: &mut egui::Ui, obj: EditObject) {
+        match obj {
+            EditObject::Vertex(idx) => {
+                ui.label(format!("Editing Vertex {}", idx));
+                // ... vertex editing UI code ...
+            }
+            EditObject::LineDef(idx) => {
+                ui.label(format!("Editing Linedef {}", idx));
+                // ... linedef editing UI code ...
+            }
+            // Handle other variants similarly...
+            _ => { ui.label("Editing other object types..."); }
+        }
+    }
+       
+
+    // Stub: draws a grid
+    fn draw_editor_grid(&self, _painter: &egui::Painter, _rect: egui::Rect) {
+        // optional
+    }
+
+    // Stub: draws map geometry
+    fn draw_map_geometry(
+        &self,
+        _painter: &egui::Painter,
+        _doc: Arc<RwLock<Document>>,
+        _rect: egui::Rect,
+    ) {
+        let _doc_read = _doc.read();
+        // draw lines, vertices, etc.
+    }
+
+    // Stub: handle user clicks
+    fn handle_editor_click(&self, _pos: egui::Pos2) {
+        // TODO
+    }
+
+    // ------------------------------------------------------------------------
+    // Dialogs etc.
+    // ------------------------------------------------------------------------
     fn update_dialogs(&mut self, _ctx: &Context) {
-        // TODO: Implement dialog management (open file, save file, settings, etc.)
+        // You might have a file dialog or something
     }
 
     fn show_open_dialog(&mut self) {
-        // TODO: Implement file open dialog
+        // placeholder
     }
+
     fn show_save_changes_dialog(&mut self) {
-        // TODO: Implement
+        // placeholder
     }
 
     fn request_exit(&mut self) {
-        // TODO: Handle window close request (prompt to save, etc.)
-        //       You'll likely need to use `frame.close()` here.
+        // placeholder: e.g. confirm close
     }
 
     fn show_about_dialog(&mut self) {
-        // TODO: Implement about dialog
+        // placeholder
     }
-
-    fn show_property_editor(&mut self, _ui: &mut egui::Ui, _obj: Selection) {
-        // TODO: Implement property editor for selected objects
-    }
-
-
-    fn draw_editor_grid(&self, _painter: &egui::Painter, _rect: egui::Rect) {
-        // TODO: Implement grid drawing
-    }
-
-    fn draw_map_geometry(&self, _painter: &egui::Painter, _doc: Arc<Document>, _rect: egui::Rect) {
-        // TODO: Implement map geometry drawing (vertices, lines, etc.)
-    }
-
-    fn handle_editor_click(&self, _pos: egui::Pos2) {
-        // TODO: Implement mouse click handling (selection, tool actions, etc.)
-    }
-
 }
 
-// Error handling (remains the same)
+// Error handling dialog
 impl MainWindow {
     fn show_error_dialog(&mut self, ctx: &Context, message: &str) {
         egui::Window::new("Error")
@@ -427,10 +470,10 @@ impl MainWindow {
     }
 }
 
-// --- Test Cases (adapted for the new structure) ---
+// Optional tests
 #[cfg(test)]
 mod tests {
-   use super::*;
+    use super::*;
 
     #[test]
     fn test_window_creation() {
@@ -444,10 +487,10 @@ mod tests {
     fn test_tool_selection() {
         let config = WindowConfig::default();
         let mut window = MainWindow::new(config);
-        window.select_tool(Tool::Select); // Directly call select_tool
+        window.select_tool(Tool::Select);
 
-        // Access the editor through a read lock
+        // Access the editor
         let editor = window.editor.read();
-        assert_eq!(editor.current_tool(), Tool::Select); // Compare directly with the enum
+        assert_eq!(editor.current_tool(), Tool::Select);
     }
 }

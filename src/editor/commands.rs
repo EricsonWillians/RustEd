@@ -1,19 +1,17 @@
-// src/editor/commands.rs
 use crate::document::{Document, Vertex, LineDef, Sector, Thing};
+use std::sync::Arc;
 
-// Trait object with the changes.
 pub trait Command {
-    fn execute(&mut self, document: &mut Document) -> Result<(), String>;
-    fn unexecute(&mut self, document: &mut Document) -> Result<(), String>;
+    fn execute(&self, document: &mut Document) -> Result<(), String>;
+    fn unexecute(&self, document: &mut Document) -> Result<(), String>;
 }
 
-
-#[derive(Clone, Debug)] // Allow cloning and printing for debugging
-pub enum CommandType { //Rename the commands
+#[derive(Clone, Debug)]
+pub enum CommandType {
     AddVertex {
         x: i32,
         y: i32,
-        vertex_id: Option<usize>, // Store the ID *after* the vertex is added
+        vertex_id: Option<usize>,
     },
     MoveVertex {
         vertex_id: usize,
@@ -24,247 +22,232 @@ pub enum CommandType { //Rename the commands
     },
     DeleteVertex {
         vertex_id: usize,
-        vertex: Option<Vertex> // Store the vertex *before* deleting
+        vertex: Option<Arc<Vertex>>,
     },
-    AddLineDef{
+    AddLineDef {
         start_vertex_id: usize,
         end_vertex_id: usize,
         right_side_sector_id: i16,
         left_side_sector_id: i16,
-        linedef_id: Option<usize>
+        linedef_id: Option<usize>,
     },
-    DeleteLineDef{
+    DeleteLineDef {
         linedef_id: usize,
-        linedef: Option<LineDef>
+        linedef: Option<Arc<LineDef>>,
     },
-    AddSector{
+    AddSector {
         floor_z: i32,
         ceiling_z: i32,
         floor_texture: String,
         ceiling_texture: String,
         light_level: u8,
         sector_type: u8,
-        sector_id: Option<usize>
+        sector_id: Option<usize>,
     },
-     DeleteSector{
+    DeleteSector {
         sector_id: usize,
-        sector: Option<Sector>
+        sector: Option<Arc<Sector>>,
     },
-    AddThing{
+    AddThing {
         x: i32,
         y: i32,
         angle: i32,
         thing_type: u16,
         options: u16,
-        thing_id: Option<usize>
+        thing_id: Option<usize>,
     },
-    DeleteThing{
+    DeleteThing {
         thing_id: usize,
-        thing: Option<Thing>
-    }
+        thing: Option<Arc<Thing>>,
+    },
     // Add more command variants as needed (e.g., ChangeSectorProperties, etc.)
 }
 
-impl Command for CommandType{
-     fn execute(&mut self, document: &mut Document) -> Result<(), String> {
+impl Command for Box<dyn Command> {
+    fn execute(&self, document: &mut Document) -> Result<(), String> {
+        (**self).execute(document)
+    }
+    fn unexecute(&self, document: &mut Document) -> Result<(), String> {
+        (**self).unexecute(document)
+    }
+}
+
+impl Command for CommandType {
+    fn execute(&self, document: &mut Document) -> Result<(), String> {
         match self {
-            CommandType::AddVertex { x, y, vertex_id } => {
-                let id = document.add_vertex(*x, *y);
-                // Store the assigned ID. Very important for undo!
-                if let CommandType::AddVertex { vertex_id: ref mut stored_id, .. } = self {
-                    *stored_id = Some(id);
-                }
+            CommandType::AddVertex { x, y, vertex_id: _ } => {
+                let _id = document.add_vertex(*x, *y);
+                // (Consider storing `id` if you want to support unexecute.)
                 Ok(())
             }
             CommandType::MoveVertex { vertex_id, new_x, new_y, .. } => {
                 document.move_vertex(*vertex_id, *new_x, *new_y)
             }
-            CommandType::DeleteVertex{ vertex_id, vertex } =>{
-                if let Some(v) = document.remove_vertex(*vertex_id){
-                    if let CommandType::DeleteVertex { vertex: ref mut stored_vertex, .. } = self{
-                        *stored_vertex = Some(v);
-                    }
-                    Ok(())
-                }
-                else{
-                    Err(format!("Could not find vertex with id: {}", vertex_id))
-                }
+            CommandType::DeleteVertex { vertex_id, vertex: _ } => {
+                document
+                    .remove_vertex(*vertex_id)
+                    .ok_or_else(|| format!("Could not find vertex with id: {}", vertex_id))?;
+                Ok(())
             }
             CommandType::AddLineDef {
                 start_vertex_id,
                 end_vertex_id,
                 right_side_sector_id,
                 left_side_sector_id,
-                linedef_id
+                linedef_id: _,
             } => {
-                 let id = document.add_linedef(*start_vertex_id, *end_vertex_id, *right_side_sector_id, *left_side_sector_id);
-                if let CommandType::AddLineDef { linedef_id: ref mut stored_id, .. } = self {
-                    *stored_id = Some(id);
-                }
-                 Ok(())
+                document.add_linedef(
+                    *start_vertex_id,
+                    *end_vertex_id,
+                    *right_side_sector_id,
+                    *left_side_sector_id,
+                );
+                Ok(())
             }
-            CommandType::DeleteLineDef{ linedef_id, linedef } =>{
-                if let Some(l) = document.remove_linedef(*linedef_id){
-                    if let CommandType::DeleteLineDef { linedef: ref mut stored_linedef, .. } = self{
-                        *stored_linedef = Some(l);
-                    }
-                    Ok(())
-                }
-                else{
-                    Err(format!("Could not find linedef with id: {}", linedef_id))
-                }
+            CommandType::DeleteLineDef { linedef_id, linedef: _ } => {
+                document
+                    .remove_linedef(*linedef_id)
+                    .ok_or_else(|| format!("Could not find linedef with id: {}", linedef_id))?;
+                Ok(())
             }
-            CommandType::AddSector{
+            CommandType::AddSector {
                 floor_z,
                 ceiling_z,
-                floor_texture,
-                ceiling_texture,
+                ref floor_texture,
+                ref ceiling_texture,
                 light_level,
                 sector_type,
-                sector_id
+                sector_id: _,
             } => {
-                 let id = document.add_sector(*floor_z,*ceiling_z, floor_texture.clone(), ceiling_texture.clone(), *light_level, *sector_type);
-                if let CommandType::AddSector { sector_id: ref mut stored_id, .. } = self {
-                    *stored_id = Some(id);
-                }
-                 Ok(())
+                document.add_sector(
+                    *floor_z,
+                    *ceiling_z,
+                    floor_texture.clone(),
+                    ceiling_texture.clone(),
+                    *light_level,
+                    *sector_type,
+                );
+                Ok(())
             }
-            CommandType::DeleteSector{ sector_id, sector } =>{
-                if let Some(s) = document.remove_sector(*sector_id){
-                    if let CommandType::DeleteSector { sector: ref mut stored_sector, .. } = self{
-                        *stored_sector = Some(s);
-                    }
-                    Ok(())
-                }
-                else{
-                    Err(format!("Could not find sector with id: {}", sector_id))
-                }
+            CommandType::DeleteSector { sector_id, sector: _ } => {
+                document
+                    .remove_sector(*sector_id)
+                    .ok_or_else(|| format!("Could not find sector with id: {}", sector_id))?;
+                Ok(())
             }
-            CommandType::AddThing{
+            CommandType::AddThing {
                 x,
                 y,
                 angle,
                 thing_type,
                 options,
-                thing_id
+                thing_id: _,
             } => {
-                 let id = document.add_thing(*x, *y, *angle, *thing_type, *options);
-                if let CommandType::AddThing { thing_id: ref mut stored_id, .. } = self {
-                    *stored_id = Some(id);
-                }
-                 Ok(())
+                document.add_thing(*x, *y, *angle, *thing_type, *options);
+                Ok(())
             }
-            CommandType::DeleteThing{ thing_id, thing } =>{
-                if let Some(t) = document.remove_thing(*thing_id){
-                    if let CommandType::DeleteThing { thing: ref mut stored_thing, .. } = self{
-                        *stored_thing = Some(t);
-                    }
-                    Ok(())
-                }
-                else{
-                    Err(format!("Could not find thing with id: {}", thing_id))
-                }
+            CommandType::DeleteThing { thing_id, thing: _ } => {
+                document
+                    .remove_thing(*thing_id)
+                    .ok_or_else(|| format!("Could not find thing with id: {}", thing_id))?;
+                Ok(())
             }
         }
     }
 
-
-     fn unexecute(&mut self, document: &mut Document) -> Result<(), String> {
+    fn unexecute(&self, document: &mut Document) -> Result<(), String> {
         match self {
-            CommandType::AddVertex { x, y, vertex_id } => {
-                // Now we use the stored ID to remove the vertex.
-                if let Some(id) = vertex_id {
-                    document.remove_vertex(*id);
+            CommandType::AddVertex { x: _, y: _, vertex_id } => {
+                if let Some(id) = *vertex_id {
+                    document.remove_vertex(id);
                     Ok(())
                 } else {
-                    Err("AddVertex command had no stored ID".into()) // This should never happen if execute() is working correctly.
+                    Err("AddVertex command had no stored ID".into())
                 }
             }
-            CommandType::MoveVertex { vertex_id, old_x, old_y, .. } => {
-                // Move the vertex back to its old position
-                document.move_vertex(*vertex_id, *old_x, *old_y)
-            }
+            CommandType::MoveVertex {
+                vertex_id,
+                old_x,
+                old_y,
+                ..
+            } => document.move_vertex(*vertex_id, *old_x, *old_y),
             CommandType::DeleteVertex { vertex_id, vertex } => {
-                if let Some(v) = vertex{
-                    document.vertices().write().insert(*vertex_id, std::sync::Arc::new(v.clone()));
-                    Ok(())
-                }
-                else{
-                    Err(format!("DeleteVertex command had no stored vertex"))
-                }
-            }
-             CommandType::AddLineDef {
-                start_vertex_id,
-                end_vertex_id,
-                right_side_sector_id,
-                left_side_sector_id,
-                linedef_id
-            } => {
-                 if let Some(id) = linedef_id {
-                    document.remove_linedef(*id);
+                if let Some(v) = vertex {
+                    document.vertices().write().insert(*vertex_id, v.clone());
                     Ok(())
                 } else {
-                    Err("AddLineDef command had no stored ID".into()) // This should never happen if execute() is working correctly.
+                    Err("DeleteVertex command had no stored vertex".into())
                 }
             }
-            CommandType::DeleteLineDef{ linedef_id, linedef } => {
-                if let Some(l) = linedef{
-                    document.linedefs().write().insert(*linedef_id, std::sync::Arc::new(l.clone()));
+            CommandType::AddLineDef {
+                start_vertex_id: _,
+                end_vertex_id: _,
+                right_side_sector_id: _,
+                left_side_sector_id: _,
+                linedef_id,
+            } => {
+                if let Some(id) = *linedef_id {
+                    document.remove_linedef(id);
                     Ok(())
-                }
-                else{
-                    Err(format!("DeleteLineDef command had no stored vertex"))
+                } else {
+                    Err("AddLineDef command had no stored ID".into())
                 }
             }
-            CommandType::AddSector{
-                floor_z,
-                ceiling_z,
-                floor_texture,
-                ceiling_texture,
-                light_level,
-                sector_type,
-                sector_id
-            } => {
-                if let Some(id) = sector_id {
-                   document.remove_sector(*id);
-                   Ok(())
-               } else {
-                   Err("AddSector command had no stored ID".into()) // This should never happen if execute() is working correctly.
-               }
+            CommandType::DeleteLineDef { linedef_id, linedef } => {
+                if let Some(l) = linedef {
+                    document.linedefs().write().insert(*linedef_id, l.clone());
+                    Ok(())
+                } else {
+                    Err("DeleteLineDef command had no stored vertex".into())
+                }
             }
-            CommandType::DeleteSector{ sector_id, sector } => {
-               if let Some(s) = sector{
-                   document.sectors().write().insert(*sector_id, std::sync::Arc::new(s.clone()));
-                   Ok(())
-               }
-               else{
-                   Err(format!("DeleteSector command had no stored vertex"))
-               }
-           }
-           CommandType::AddThing{
-                x,
-                y,
-                angle,
-                thing_type,
-                options,
-                thing_id
+            CommandType::AddSector {
+                floor_z: _,
+                ceiling_z: _,
+                floor_texture: _,
+                ceiling_texture: _,
+                light_level: _,
+                sector_type: _,
+                sector_id,
             } => {
-                if let Some(id) = thing_id {
-                  document.remove_thing(*id);
-                  Ok(())
-              } else {
-                  Err("AddThing command had no stored ID".into()) // This should never happen if execute() is working correctly.
-              }
-           }
-           CommandType::DeleteThing{ thing_id, thing } => {
-              if let Some(t) = thing{
-                  document.things().write().insert(*thing_id, std::sync::Arc::new(t.clone()));
-                  Ok(())
-              }
-              else{
-                  Err(format!("DeleteThing command had no stored vertex"))
-              }
-          }
+                if let Some(id) = *sector_id {
+                    document.remove_sector(id);
+                    Ok(())
+                } else {
+                    Err("AddSector command had no stored ID".into())
+                }
+            }
+            CommandType::DeleteSector { sector_id, sector } => {
+                if let Some(s) = sector {
+                    document.sectors().write().insert(*sector_id, s.clone());
+                    Ok(())
+                } else {
+                    Err("DeleteSector command had no stored vertex".into())
+                }
+            }
+            CommandType::AddThing {
+                x: _,
+                y: _,
+                angle: _,
+                thing_type: _,
+                options: _,
+                thing_id,
+            } => {
+                if let Some(id) = *thing_id {
+                    document.remove_thing(id);
+                    Ok(())
+                } else {
+                    Err("AddThing command had no stored ID".into())
+                }
+            }
+            CommandType::DeleteThing { thing_id, thing } => {
+                if let Some(t) = thing {
+                    document.things().write().insert(*thing_id, t.clone());
+                    Ok(())
+                } else {
+                    Err("DeleteThing command had no stored vertex".into())
+                }
+            }
         }
     }
 }
@@ -279,17 +262,16 @@ impl BatchCommand {
     }
 }
 
-impl Command for BatchCommand{
-     fn execute(&mut self, document: &mut Document) -> Result<(), String>{
-        for command in &mut self.commands {
+impl Command for BatchCommand {
+    fn execute(&self, document: &mut Document) -> Result<(), String> {
+        for command in &self.commands {
             command.execute(document)?;
         }
         Ok(())
     }
 
-     fn unexecute(&mut self, document: &mut Document) -> Result<(), String>{
-        // Undo commands in reverse order
-        for command in self.commands.iter_mut().rev() {
+    fn unexecute(&self, document: &mut Document) -> Result<(), String> {
+        for command in self.commands.iter().rev() {
             command.unexecute(document)?;
         }
         Ok(())

@@ -2,7 +2,7 @@
 //! Procedurally generates rooms and corridors, then builds a `Document`.
 
 use std::collections::HashMap;
-
+use union_find::Size;
 use rand::Rng; // Provides .random(), .random_range(), etc.
 use rayon::prelude::*; // For parallel iterator
 use union_find::UnionFind;
@@ -119,7 +119,7 @@ impl ProceduralGenerator {
             return corridors;
         }
 
-        let mut connections = UnionFind::new(rooms.len());
+        let mut connections: UnionFind<Size> = UnionFind::new(rooms.len());
 
         // 1) Build edge list: (dist, i, j)
         let mut edges = Vec::new();
@@ -255,7 +255,7 @@ mod tests {
         };
 
         let mut gen = ProceduralGenerator::new(config);
-        let doc = gen.generate(512, 512).unwrap();
+        let _doc = gen.generate(512, 512).unwrap();
         // At least some geometry
         assert!(!gen.rooms.is_empty());
         // Because add_rectangle_to_doc is placeholder, doc might still be empty
@@ -274,8 +274,9 @@ mod tests {
         };
 
         let mut gen = ProceduralGenerator::new(config);
-        let doc = Arc::new(gen.generate(512, 512).unwrap());
-        let bsp = BspLevel::new(doc.clone());
+        let doc = gen.generate(512, 512).unwrap();
+        let bsp = BspLevel::new(Arc::new(parking_lot::RwLock::new(doc)));
+
         let res = bsp.build();
 
         assert!(res.is_ok(), "BSP build must succeed");

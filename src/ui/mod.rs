@@ -1,6 +1,4 @@
 // src/ui/mod.rs
-pub use crate::editor::Command; // Correct import
-
 pub mod about;
 pub mod browser;
 pub mod canvas;
@@ -25,6 +23,10 @@ pub mod theme;
 pub mod thing_ui;
 pub mod tile;
 pub mod vertex_ui;
+// pub mod commands; // Don't need this here, commands are under editor.
+
+
+//pub use commands::Command; // No longer needed here.
 //pub mod window; //Remove this module
 
 pub use dialog::DialogManager;
@@ -33,3 +35,23 @@ pub use theme::Theme;
 
 mod tool_window_manager; // Declare the module
 pub use tool_window_manager::ToolWindowManager; // and re-export it
+
+// use crate::document::{Document, Vertex, LineDef, Sector, Thing}; // Not needed in this file
+// use std::sync::Arc; // Not needed
+
+// pub trait Command {  // This is now in src/editor/commands.rs
+//     fn execute(&self, document: &mut Document) -> Result<(), String>;
+//     fn unexecute(&self, document: &mut Document) -> Result<(), String>;
+// }
+
+// The enum and impl Command for CommandType are part of the editor now
+// so they've moved to src/editor/commands.rs
+
+// #[derive(Clone, Debug)]
+// pub enum CommandType { ... }
+
+// impl Command for CommandType { ... }
+
+// pub struct BatchCommand { ... }
+
+// impl Command for BatchCommand { ... }

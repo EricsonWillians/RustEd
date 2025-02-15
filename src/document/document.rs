@@ -154,18 +154,18 @@ impl Thing {
 
 #[derive(Default)]
 pub struct Document {
-    things: Arc<RwLock<Vec<Arc<Thing>>>>,
-    vertices: Arc<RwLock<Vec<Arc<Vertex>>>>,
-    sectors: Arc<RwLock<Vec<Arc<Sector>>>>,
-    sidedefs: Arc<RwLock<Vec<Arc<SideDef>>>>,
-    linedefs: Arc<RwLock<Vec<Arc<LineDef>>>>,
+    pub things: Arc<RwLock<Vec<Arc<Thing>>>>,
+    pub vertices: Arc<RwLock<Vec<Arc<Vertex>>>>,
+    pub sectors: Arc<RwLock<Vec<Arc<Sector>>>>,
+    pub sidedefs: Arc<RwLock<Vec<Arc<SideDef>>>>,
+    pub linedefs: Arc<RwLock<Vec<Arc<LineDef>>>>,
 
-    header_data: Arc<RwLock<Vec<u8>>>,
-    behavior_data: Arc<RwLock<Vec<u8>>>,
-    scripts_data: Arc<RwLock<Vec<u8>>>,
-    basis: Arc<RwLock<Vec<u8>>>, // Is this still needed?
+    pub header_data: Arc<RwLock<Vec<u8>>>,
+    pub behavior_data: Arc<RwLock<Vec<u8>>>,
+    pub scripts_data: Arc<RwLock<Vec<u8>>>,
+    pub basis: Arc<RwLock<Vec<u8>>>, // Is this still needed?
 
-    checksum: Arc<RwLock<u32>>,
+    pub checksum: Arc<RwLock<u32>>,
 }
 
 impl Document {
@@ -211,27 +211,30 @@ impl Document {
         }
     }
 
-    pub fn remove_vertex(&mut self, vertex_id: usize) -> Option<Vertex>{
+    pub fn remove_vertex(&mut self, vertex_id: usize) -> Option<Vertex> {
         let mut vertices = self.vertices.write();
-        if vertex_id < vertices.len(){
-            let mut removed = vertices.remove(vertex_id);
-            //Decrement the vertices indexes on linedefs
-            if let Some(mut linedefs) = self.linedefs.write(){
-                for l in linedefs.iter_mut(){
-                    let mut line_ref = Arc::make_mut(l);
-                    if line_ref.start > vertex_id{
-                        line_ref.start -= 1;
+        if vertex_id < vertices.len() {
+            let removed = vertices.remove(vertex_id);
+    
+            // Decrement the vertex indices in each linedef
+            {
+                let mut linedefs = self.linedefs.write();
+                for linedef_arc in linedefs.iter_mut() {
+                    let linedef = Arc::make_mut(linedef_arc);
+                    if linedef.start > vertex_id {
+                        linedef.start -= 1;
                     }
-                    if line_ref.end > vertex_id{
-                        line_ref.end -= 1;
+                    if linedef.end > vertex_id {
+                        linedef.end -= 1;
                     }
                 }
             }
-            Some(Arc::try_unwrap(removed).unwrap()) //Return the vertex
-        } else{
-            None //Invalid Id
+    
+            Some(Arc::try_unwrap(removed).unwrap())
+        } else {
+            None
         }
-    }
+    }    
     
     pub fn add_linedef(&mut self, start_vertex_id: usize, end_vertex_id: usize, right_side_sector_id: i16, left_side_sector_id: i16) -> usize {
         let mut linedefs = self.linedefs.write();
