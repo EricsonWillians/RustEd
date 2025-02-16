@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::Cursor;
 use std::sync::Arc;
 
+use futures::FutureExt;
 use log::{error, info};
 use parking_lot::RwLock;
 use rfd::FileDialog;
@@ -216,7 +217,7 @@ impl Editor {
             let _doc = doc_arc.read();
             // Real logic needed here
             info!("(Placeholder) Document saved.");
-            Ok(())
+            Ok::<(), String>(())
         } else {
             Err("No document available to save.".into())
         }
@@ -293,50 +294,67 @@ impl Editor {
         info!("Canceled current operation. Tool reset to Select.");
     }
 
-    /// Loads a map level from the current WAD data, with improved lock management
-    /// and error handling. Re-centers the view on successful load.
-    pub fn load_level_wrapper(&mut self, level: String) -> Result<(), String> {
-        // Early return if no document is present
-        let doc_arc = self.document.as_ref()
-            .ok_or_else(|| "No document present".to_string())?;
-
-        // First, extract WAD data under a smaller read lock scope
-        let wad_data = {
-            let doc_read = doc_arc.read();
-            let wad_data_read = doc_read.wad_data.read();
-            wad_data_read.clone()
-                .ok_or_else(|| "No WAD data stored for the current document".to_string())?
-        }; // Locks are dropped here
-
-        // Create cursor outside of any locks
-        let mut cursor = std::io::Cursor::new(wad_data);
-
-        // Load the level data under a write lock
-        {
-            let mut doc_write = doc_arc.write();
-            doc_write.load_level(&level, &mut cursor)
-                .map_err(|e| format!("Failed to load level {}: {}", level, e))?;
-            
-            // Calculate bounding box while we still have the write lock
-            let bbox = doc_write.bounding_box();
-            
-            // Update central panel if we have both a bounding box and panel
-            if let (Some(bbox), Some(cp_arc)) = (bbox, &self.central_panel) {
-                let center = bbox.center();
-                let mut cp = cp_arc.write();
-                
-                // Update view in a deadlock-safe way
-                cp.set_zoom(1.0);
-                cp.set_pan(egui::vec2(-center.x, -center.y));
+    /// Loads a map level from the current WAD data.
+    pub fn load_level_wrapper(&mut self, level: String) {
+        // Create a new runtime for async operations
+        let runtime = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                let msg = format!("Failed to create async runtime: {}", e);
+                error!("{}", msg);
+                self.error_message = Some(msg);
+                return;
             }
-        } // Write lock is dropped here
+        };
 
-        // Update status only after successful load
-        self.status_message = format!("Loaded level: {}", level);
-        self.error_message = None;
-        
-        log::info!("Loaded level {} successfully.", level);
-        Ok(())
+        // Run the async loading process in the runtime
+        match runtime.block_on(async {
+            // Early return if no document is present
+            let doc_arc = self.document.as_ref()
+                .ok_or_else(|| "No document present".to_string())?;
+
+            // Extract WAD data under a smaller read lock scope
+            let wad_data = {
+                let doc_read = doc_arc.read(); // `mut` removed
+                let wad_data_read = doc_read.wad_data.read();
+                wad_data_read.clone()
+                    .ok_or_else(|| "No WAD data stored for the current document".to_string())?
+            }; // Locks are dropped here
+
+            // Create cursor outside of any locks
+            let mut cursor = Cursor::new(wad_data);
+
+            // Load the level data under a write lock
+            {
+                let mut doc_write = doc_arc.write();
+                doc_write.load_level_async(&level, &mut cursor)
+                    .await
+                    .map_err(|e| format!("Failed to load level {}: {}", level, e))?;
+                
+                // Calculate bounding box while we still have the write lock
+                if let Some(bbox) = doc_write.bounding_box() {
+                    if let Some(cp_arc) = &self.central_panel {
+                        let center = bbox.center();
+                        let mut cp = cp_arc.write();
+                        cp.set_zoom(1.0);
+                        cp.set_pan(egui::vec2(-center.x, -center.y));
+                    }
+                }
+            }
+
+            Ok::<(), String>(()) // Explicit Ok with type
+        }) {
+            Ok(_) => {
+                self.status_message = format!("Loaded level: {}", level);
+                self.error_message = None;
+                info!("Loaded level {} successfully.", level);
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                error!("{}", msg);
+                self.error_message = Some(msg);
+            }
+        }
     }
 
     /// Helper method to update the view center, separated for clarity
@@ -346,7 +364,7 @@ impl Editor {
             let mut cp = cp_arc.write();
             cp.set_zoom(1.0);
             cp.set_pan(egui::vec2(-center.x, -center.y));
-            Ok(())
+            Ok::<(), String>(())
         } else {
             Err("No central panel available".to_string())
         }

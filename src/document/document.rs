@@ -66,6 +66,20 @@ pub struct Document {
     pub map_name: String,
 }
 
+
+#[derive(Debug, Clone)]
+pub enum LoadProgress {
+    Started,
+    ChunkLoaded(u8), // Percentage complete
+    Completed,
+}
+
+// Helper trait for async loading
+#[async_trait::async_trait]
+pub trait AsyncLoadable: Sized {
+    async fn load_async<R: Read + Seek + Send>(reader: &mut R) -> io::Result<Self>;
+}
+
 const FILELUMP_SIZE: usize = 16; // 4 bytes (filepos) + 4 bytes (size) + 8 bytes (name)
 
 impl Document {
@@ -390,76 +404,83 @@ impl Document {
     /// Loads a WAD file from the given reader.
     /// Reads the entire file into memory (wad_data) so that levels can be reloaded on demand.
     pub fn load_wad<R: Read + Seek>(&mut self, reader: &mut R) -> io::Result<()> {
-        self.clear();
-        self.clear_geometry();
+        // Create a new runtime for async operations
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-        // Determine total file size.
-        let total_size = reader.seek(SeekFrom::End(0))?;
-        reader.seek(SeekFrom::Start(0))?;
+        runtime.block_on(async {
+            self.clear();
+            self.clear_geometry();
 
-        // Read entire file into memory.
-        let mut full_data = Vec::with_capacity(total_size as usize);
-        reader.read_to_end(&mut full_data)?;
-        *self.wad_data.write() = Some(full_data.clone());
-        // Create a new cursor over the full data.
-        let mut cursor = Cursor::new(full_data);
+            // Determine total file size.
+            let total_size = reader.seek(SeekFrom::End(0))?;
+            reader.seek(SeekFrom::Start(0))?;
 
-        // --- Read Header ---
-        let mut header_buf = [0u8; 12];
-        cursor.read_exact(&mut header_buf)?;
-        let ident = &header_buf[0..4];
-        if ident != b"IWAD" && ident != b"PWAD" {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
-                format!("Invalid WAD identifier: {}", String::from_utf8_lossy(ident))));
-        }
-        *self.header_data.write() = header_buf.to_vec();
-        let num_lumps = (&header_buf[4..8]).read_i32::<LE>()?;
-        let infotableofs = (&header_buf[8..12]).read_i32::<LE>()?;
-        if (infotableofs as u64) > total_size {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Directory offset exceeds total file size"));
-        }
+            // Read entire file into memory.
+            let mut full_data = Vec::with_capacity(total_size as usize);
+            reader.read_to_end(&mut full_data)?;
+            *self.wad_data.write() = Some(full_data.clone());
+            
+            // Create a new cursor over the full data.
+            let mut cursor = Cursor::new(full_data);
 
-        // --- Read Directory ---
-        let dir_size = (num_lumps as usize) * FILELUMP_SIZE;
-        cursor.seek(SeekFrom::Start(infotableofs as u64))?;
-        let mut dir_buf = vec![0u8; dir_size];
-        cursor.read_exact(&mut dir_buf)?;
-        let mut directory = Vec::with_capacity(num_lumps as usize);
-        for i in 0..(num_lumps as usize) {
-            let offset = i * FILELUMP_SIZE;
-            let lump_offset = (&dir_buf[offset..offset+4]).read_i32::<LE>()?;
-            let lump_size = (&dir_buf[offset+4..offset+8]).read_i32::<LE>()?;
-            let name_bytes = &dir_buf[offset+8..offset+16];
-            let lump_name = str::from_utf8(name_bytes).unwrap_or("").trim_end_matches('\0').to_string();
-            if lump_offset < 0 || lump_size < 0 ||
-               (lump_offset as u64) > total_size ||
-               (lump_offset as u64) + (lump_size as u64) > total_size {
-                eprintln!("WARNING: Lump '{}' has invalid offset/size ({}+{} > {})",
-                          lump_name, lump_offset, lump_size, total_size);
-                continue;
+            // --- Read Header ---
+            let mut header_buf = [0u8; 12];
+            cursor.read_exact(&mut header_buf)?;
+            let ident = &header_buf[0..4];
+            if ident != b"IWAD" && ident != b"PWAD" {
+                return Err(io::Error::new(io::ErrorKind::InvalidData,
+                    format!("Invalid WAD identifier: {}", String::from_utf8_lossy(ident))));
             }
-            directory.push(LumpEntry { offset: lump_offset, size: lump_size, name: lump_name });
-        }
-        *self.directory.write() = directory;
+            *self.header_data.write() = header_buf.to_vec();
+            let num_lumps = (&header_buf[4..8]).read_i32::<LE>()?;
+            let infotableofs = (&header_buf[8..12]).read_i32::<LE>()?;
+            if (infotableofs as u64) > total_size {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "Directory offset exceeds total file size"));
+            }
 
-        // --- Group Lumps into Levels ---
-        let levels = Self::group_levels(&self.directory.read());
-        *self.levels.write() = levels;
+            // --- Read Directory ---
+            let dir_size = (num_lumps as usize) * FILELUMP_SIZE;
+            cursor.seek(SeekFrom::Start(infotableofs as u64))?;
+            let mut dir_buf = vec![0u8; dir_size];
+            cursor.read_exact(&mut dir_buf)?;
+            let mut directory = Vec::with_capacity(num_lumps as usize);
+            for i in 0..(num_lumps as usize) {
+                let offset = i * FILELUMP_SIZE;
+                let lump_offset = (&dir_buf[offset..offset+4]).read_i32::<LE>()?;
+                let lump_size = (&dir_buf[offset+4..offset+8]).read_i32::<LE>()?;
+                let name_bytes = &dir_buf[offset+8..offset+16];
+                let lump_name = str::from_utf8(name_bytes).unwrap_or("").trim_end_matches('\0').to_string();
+                if lump_offset < 0 || lump_size < 0 ||
+                   (lump_offset as u64) > total_size ||
+                   (lump_offset as u64) + (lump_size as u64) > total_size {
+                    eprintln!("WARNING: Lump '{}' has invalid offset/size ({}+{} > {})",
+                              lump_name, lump_offset, lump_size, total_size);
+                    continue;
+                }
+                directory.push(LumpEntry { offset: lump_offset, size: lump_size, name: lump_name });
+            }
+            *self.directory.write() = directory;
 
-        // --- Automatically load the first level (if available) ---
-        let first_level_name = {
-            let levels = self.levels.read();
-            levels.get(0).map(|lvl| lvl.name.clone())
-        };
-        if let Some(level_name) = first_level_name {
-            let wad_data_clone = {
-                let wad = self.wad_data.read();
-                wad.as_ref().unwrap().clone()
+            // --- Group Lumps into Levels ---
+            let levels = Self::group_levels(&self.directory.read());
+            *self.levels.write() = levels;
+
+            // --- Automatically load the first level (if available) ---
+            let first_level_name = {
+                let levels = self.levels.read();
+                levels.get(0).map(|lvl| lvl.name.clone())
             };
-            self.load_level(&level_name, &mut Cursor::new(wad_data_clone))?;
-            *self.selected_level.write() = Some(level_name);
-        }
-        Ok(())
+            if let Some(level_name) = first_level_name {
+                let wad_data_clone = {
+                    let wad = self.wad_data.read();
+                    wad.as_ref().unwrap().clone()
+                };
+                self.load_level_async(&level_name, &mut Cursor::new(wad_data_clone)).await?;
+                *self.selected_level.write() = Some(level_name);
+            }
+            Ok(())
+        })
     }
 
     /// Groups lumps from the directory into levels based on markers (e.g. "MAP01" or "E1M1").
@@ -520,8 +541,213 @@ impl Document {
         Some(egui::Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y)))
     }
 
+    // --- WAD Lump Loading Methods ---
+
+    async fn load_vertices_async<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        offset: i32,
+        size: i32
+    ) -> io::Result<()> {
+        if size % 4 != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, 
+                "VERTEXES lump size is not a multiple of 4"));
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        reader.seek(SeekFrom::Start(offset as u64))?;
+        reader.read_exact(&mut buffer)?;
+
+        let vertices_data = tokio::task::spawn_blocking(move || {
+            let mut vertices = Vec::new();
+            let mut cursor = Cursor::new(buffer);
+            let num_vertices = size / 4;
+            
+            for _ in 0..num_vertices {
+                if let Ok(vertex) = Vertex::from_wad(&mut cursor) {
+                    vertices.push(Arc::new(vertex));
+                }
+            }
+            vertices
+        }).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        let mut vertices = self.vertices.write();
+        *vertices = vertices_data;
+        
+        Ok(())
+    }
+
+    async fn load_sectors_async<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        offset: i32,
+        size: i32
+    ) -> io::Result<()> {
+        if size % 26 != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, 
+                "SECTORS lump size is not a multiple of 26"));
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        reader.seek(SeekFrom::Start(offset as u64))?;
+        reader.read_exact(&mut buffer)?;
+
+        let sectors_data = tokio::task::spawn_blocking(move || {
+            let mut sectors = Vec::new();
+            let mut cursor = Cursor::new(buffer);
+            let num_sectors = size / 26;
+            
+            for _ in 0..num_sectors {
+                if let Ok(sector) = Sector::from_wad(&mut cursor) {
+                    sectors.push(Arc::new(sector));
+                }
+            }
+            sectors
+        }).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        let mut sectors = self.sectors.write();
+        *sectors = sectors_data;
+        
+        Ok(())
+    }
+
+    async fn load_sidedefs_async<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        offset: i32,
+        size: i32
+    ) -> io::Result<()> {
+        if size % 30 != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, 
+                "SIDEDEFS lump size is not a multiple of 30"));
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        reader.seek(SeekFrom::Start(offset as u64))?;
+        reader.read_exact(&mut buffer)?;
+
+        let sidedefs_data = tokio::task::spawn_blocking(move || {
+            let mut sidedefs = Vec::new();
+            let mut cursor = Cursor::new(buffer);
+            let num_sidedefs = size / 30;
+            
+            for _ in 0..num_sidedefs {
+                if let Ok(sidedef) = SideDef::from_wad(&mut cursor) {
+                    sidedefs.push(Arc::new(sidedef));
+                }
+            }
+            sidedefs
+        }).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        let mut sidedefs = self.sidedefs.write();
+        *sidedefs = sidedefs_data;
+        
+        Ok(())
+    }
+
+    async fn load_linedefs_async<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        offset: i32,
+        size: i32
+    ) -> io::Result<()> {
+        if size % 14 != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, 
+                "LINEDEFS lump size is not a multiple of 14"));
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        reader.seek(SeekFrom::Start(offset as u64))?;
+        reader.read_exact(&mut buffer)?;
+
+        let linedefs_data = tokio::task::spawn_blocking(move || {
+            let mut linedefs = Vec::new();
+            let mut cursor = Cursor::new(buffer);
+            let num_linedefs = size / 14;
+            
+            for _ in 0..num_linedefs {
+                if let Ok(linedef) = LineDef::from_wad(&mut cursor) {
+                    linedefs.push(Arc::new(linedef));
+                }
+            }
+            linedefs
+        }).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        let mut linedefs = self.linedefs.write();
+        *linedefs = linedefs_data;
+        
+        Ok(())
+    }
+
+    async fn load_things_async<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        offset: i32,
+        size: i32
+    ) -> io::Result<()> {
+        if size % 10 != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, 
+                "THINGS lump size is not a multiple of 10"));
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        reader.seek(SeekFrom::Start(offset as u64))?;
+        reader.read_exact(&mut buffer)?;
+
+        let things_data = tokio::task::spawn_blocking(move || {
+            let mut things = Vec::new();
+            let mut cursor = Cursor::new(buffer);
+            let num_things = size / 10;
+            
+            for _ in 0..num_things {
+                if let Ok(thing) = Thing::from_wad(&mut cursor) {
+                    things.push(Arc::new(thing));
+                }
+            }
+            things
+        }).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        let mut things = self.things.write();
+        *things = things_data;
+        
+        Ok(())
+    }
+
+    async fn load_behavior_async<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        offset: i32,
+        size: i32
+    ) -> io::Result<()> {
+        let mut buffer = vec![0u8; size as usize];
+        reader.seek(SeekFrom::Start(offset as u64))?;
+        reader.read_exact(&mut buffer)?;
+
+        let mut behavior_data = self.behavior_data.write();
+        *behavior_data = buffer;
+        
+        Ok(())
+    }
+
+    async fn load_scripts_async<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        offset: i32,
+        size: i32
+    ) -> io::Result<()> {
+        let mut buffer = vec![0u8; size as usize];
+        reader.seek(SeekFrom::Start(offset as u64))?;
+        reader.read_exact(&mut buffer)?;
+
+        let mut scripts_data = self.scripts_data.write();
+        *scripts_data = buffer;
+        
+        Ok(())
+    }
+
     /// Loads the geometry for a level given by its marker (e.g. "MAP01").
-    pub fn load_level<R: Read + Seek>(&mut self, level_name: &str, reader: &mut R) -> io::Result<()> {
+    /// 
+    pub async fn load_level_async<R: Read + Seek>(&mut self, level_name: &str, reader: &mut R) -> io::Result<()> {
         self.clear_geometry();
         let level_info_opt = {
             let levels = self.levels.read();
@@ -534,13 +760,13 @@ impl Document {
                 // Normalize lump name by trimming and converting to uppercase.
                 let lump_name = entry.name.trim().to_uppercase();
                 match lump_name.as_str() {
-                    "THINGS" => { self.load_things(reader, entry.offset, entry.size)?; },
-                    "VERTEXES" => { self.load_vertices(reader, entry.offset, entry.size)?; },
-                    "SECTORS" => { self.load_sectors(reader, entry.offset, entry.size)?; },
-                    "SIDEDEFS" => { self.load_sidedefs(reader, entry.offset, entry.size)?; },
-                    "LINEDEFS" => { self.load_linedefs(reader, entry.offset, entry.size)?; },
-                    "BEHAVIOR" => { self.load_behavior(reader, entry.offset, entry.size)?; },
-                    "SCRIPTS" => { self.load_scripts(reader, entry.offset, entry.size)?; },
+                    "THINGS" => { self.load_things_async(reader, entry.offset, entry.size).await?; },
+                    "VERTEXES" => { self.load_vertices_async(reader, entry.offset, entry.size).await?; },
+                    "SECTORS" => { self.load_sectors_async(reader, entry.offset, entry.size).await?; },
+                    "SIDEDEFS" => { self.load_sidedefs_async(reader, entry.offset, entry.size).await?; },
+                    "LINEDEFS" => { self.load_linedefs_async(reader, entry.offset, entry.size).await?; },
+                    "BEHAVIOR" => { self.load_behavior_async(reader, entry.offset, entry.size).await?; },
+                    "SCRIPTS" => { self.load_scripts_async(reader, entry.offset, entry.size).await?; },
                     _ => { /* Ignore unknown lumps */ }
                 }
             }
@@ -554,109 +780,6 @@ impl Document {
     /// Returns a list of available level markers.
     pub fn available_levels(&self) -> Vec<String> {
         self.levels.read().iter().map(|lvl| lvl.name.clone()).collect()
-    }
-
-    // --- Lump-loading helper functions ---
-
-    fn load_things<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
-        // Each thing record is 10 bytes (classic DOOM).
-        if size % 10 != 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "THINGS lump size is not a multiple of 10"));
-        }
-        reader.seek(SeekFrom::Start(offset as u64))?;
-        let num_things = size / 10;
-        let mut things = self.things.write();
-        things.clear();
-        things.reserve(num_things as usize);
-        for _ in 0..num_things {
-            let thing = Thing::from_wad(reader)?;
-            things.push(Arc::new(thing));
-        }
-        Ok(())
-    }
-
-    fn load_vertices<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
-        // Each vertex record is 4 bytes.
-        if size % 4 != 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "VERTEXES lump size is not a multiple of 4"));
-        }
-        reader.seek(SeekFrom::Start(offset as u64))?;
-        let num_vertices = size / 4;
-        let mut vertices = self.vertices.write();
-        vertices.clear();
-        vertices.reserve(num_vertices as usize);
-        for _ in 0..num_vertices {
-            let vertex = Vertex::from_wad(reader)?;
-            vertices.push(Arc::new(vertex));
-        }
-        Ok(())
-    }
-
-    fn load_sectors<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
-        // Each sector record is 26 bytes.
-        if size % 26 != 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "SECTORS lump size is not a multiple of 26"));
-        }
-        reader.seek(SeekFrom::Start(offset as u64))?;
-        let num_sectors = size / 26;
-        let mut sectors = self.sectors.write();
-        sectors.clear();
-        sectors.reserve(num_sectors as usize);
-        for _ in 0..num_sectors {
-            let sector = Sector::from_wad(reader)?;
-            sectors.push(Arc::new(sector));
-        }
-        Ok(())
-    }
-
-    fn load_sidedefs<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
-        // Each sidedef record is 30 bytes.
-        if size % 30 != 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "SIDEDEFS lump size is not a multiple of 30"));
-        }
-        reader.seek(SeekFrom::Start(offset as u64))?;
-        let num_sidedefs = size / 30;
-        let mut sidedefs = self.sidedefs.write();
-        sidedefs.clear();
-        sidedefs.reserve(num_sidedefs as usize);
-        for _ in 0..num_sidedefs {
-            let sd = SideDef::from_wad(reader)?;
-            sidedefs.push(Arc::new(sd));
-        }
-        Ok(())
-    }
-
-    fn load_linedefs<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
-        // Each linedef record is 14 bytes.
-        if size % 14 != 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "LINEDEFS lump size is not a multiple of 14"));
-        }
-        reader.seek(SeekFrom::Start(offset as u64))?;
-        let num_linedefs = size / 14;
-        let mut linedefs = self.linedefs.write();
-        linedefs.clear();
-        linedefs.reserve(num_linedefs as usize);
-        for _ in 0..num_linedefs {
-            let ld = LineDef::from_wad(reader)?;
-            linedefs.push(Arc::new(ld));
-        }
-        Ok(())
-    }
-
-    fn load_behavior<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
-        reader.seek(SeekFrom::Start(offset as u64))?;
-        let mut data = vec![0u8; size as usize];
-        reader.read_exact(&mut data)?;
-        *self.behavior_data.write() = data;
-        Ok(())
-    }
-
-    fn load_scripts<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
-        reader.seek(SeekFrom::Start(offset as u64))?;
-        let mut data = vec![0u8; size as usize];
-        reader.read_exact(&mut data)?;
-        *self.scripts_data.write() = data;
-        Ok(())
     }
 
     // --- Sector relationships and geometry helper methods ---
