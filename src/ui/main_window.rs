@@ -1,12 +1,12 @@
+// src/ui/main_window.rs
+
 use std::sync::Arc;
 
-use eframe::egui::{self, Context, Sense, Vec2};
+use eframe::egui::{self, Context, Sense, Vec2, Ui};
 use log::{info, error};
 use parking_lot::RwLock;
 use crate::editor::commands::{Command, CommandType};
-
-use crate::editor::objects::EditObject;
-use crate::editor::Selection; 
+use crate::editor::Selection;
 use crate::{
     bsp::debug_viz::BspDebugger,
     document::Document,
@@ -82,9 +82,9 @@ impl MainWindow {
     }
 
     /// Main UI update loop
-    pub fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
+    pub fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.handle_input(ctx);
-        self.update_layout(ctx, frame);
+        self.update_layout(ctx, _frame);
     }
 
     // ------------------------------------------------------------------------
@@ -127,7 +127,7 @@ impl MainWindow {
     // ------------------------------------------------------------------------
     // Overall Layout
     // ------------------------------------------------------------------------
-    fn update_layout(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
+    fn update_layout(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.update_menu_bar(ctx);
         self.update_side_panel(ctx);
         self.update_central_area(ctx);
@@ -203,50 +203,42 @@ impl MainWindow {
         });
     }
 
-    // ------------------------------------------------------------------------
-    // Left Side Tools Panel
-    // ------------------------------------------------------------------------
-    fn update_side_panel(&mut self, ctx: &Context) {
-        if !self.show_side_panel {
-            return;
-        }
 
-        egui::SidePanel::left("tools_panel")
-            .default_width(self.side_panel_width)
-            .resizable(true)
-            .show(ctx, |ui| {
-                ui.heading("Tools");
-
-                let editor = self.editor.read();
-                for tool in editor.available_tools() {
-                    let selected = editor.current_tool() == *tool;
-                    if ui.selectable_label(selected, tool.name()).clicked() {
-                        // We must drop 'editor' before writing again
-                        drop(editor);
-                        self.select_tool(*tool);
-                        return;
-                    }
-                }
-
-                ui.separator();
-                ui.heading("Properties");
-
-                if let Some(selection) = editor.selected_object() {
-                    // Now we correctly match against the Selection enum.
-                    let edit_obj = match selection {
-                        Selection::Vertex(idx) => EditObject::Vertex(*idx),
-                        Selection::Line(idx) => EditObject::LineDef(*idx),
-                        Selection::Sector(idx) => EditObject::Sector(*idx),
-                        Selection::Thing(idx) => EditObject::Thing(*idx),
-                    };
-                    drop(editor);
-                    self.show_property_editor(ui, edit_obj);
-                } else {
-                    ui.label("No object selected");
-                }
-            });
+// ------------------------------------------------------------------------
+// Left Side Tools Panel
+// ------------------------------------------------------------------------
+fn update_side_panel(&mut self, ctx: &Context) {
+    if !self.show_side_panel {
+        return;
     }
-    
+
+    egui::SidePanel::left("tools_panel")
+        .default_width(self.side_panel_width)
+        .resizable(true)
+        .show(ctx, |ui| {
+            ui.heading("Tools");
+
+            let editor = self.editor.read();
+            for tool in editor.available_tools() {
+                let selected = editor.current_tool() == tool;
+                if ui.selectable_label(selected, tool.name()).clicked() {
+                    // We must drop 'editor' before writing again
+                    drop(editor);
+                    self.select_tool(tool);
+                    return;
+                }
+            }
+
+            ui.separator();
+            ui.heading("Properties");
+
+            let selection = editor.selected_object();
+            drop(editor); // Drop the lock *before* calling show_property_editor
+            self.show_property_editor(ui, &selection); // Pass a reference
+
+        });
+}
+
     // ------------------------------------------------------------------------
     // Central Area
     // ------------------------------------------------------------------------
@@ -308,8 +300,24 @@ impl MainWindow {
             .default_size(Vec2::new(800.0, 600.0))
             .show(ctx, |ui| {
                 let editor = self.editor.read();
-                if let Some(bsp) = editor.bsp_tree() {
-                    self.bsp_debugger.show(ui, &bsp);
+                if let Some(bsp_level) = editor.bsp_level() {
+                    // Access the BSP data through the BspLevel:
+                    let root_guard = bsp_level.root.read(); // Acquire a read lock
+                    if let Some(root_node) = &*root_guard {
+                        // Now you can work with the root node:
+                        self.bsp_debugger.show(ui, &bsp_level); // Assuming show takes &BspLevel
+                    } else {
+                        ui.label("BSP root node not built yet.");
+                    }
+
+                    // Example: Accessing subsectors:
+                    let subsectors_guard = bsp_level.subsectors.read();
+                    ui.label(format!("Number of subsectors: {}", subsectors_guard.len()));
+
+                    // Example: Accessing blocks (if you use them):
+                    let blocks_guard = bsp_level.blocks.read();
+                    ui.label(format!("Blockmap size: {}x{}", blocks_guard.width, blocks_guard.height));
+
                 } else {
                     ui.label("No BSP data available.");
                     // Quick button to generate a test map
@@ -393,22 +401,29 @@ impl MainWindow {
         screen_pos
     }
 
-    // Stub property editor
-    fn show_property_editor(&mut self, ui: &mut egui::Ui, obj: EditObject) {
-        match obj {
-            EditObject::Vertex(idx) => {
-                ui.label(format!("Editing Vertex {}", idx));
-                // ... vertex editing UI code ...
+    fn show_property_editor(&mut self, ui: &mut Ui, selection: &Selection) {
+        match selection {
+            Selection::Vertex(vertex) => {
+                ui.label(format!("Vertex: ({}, {})", vertex.raw_x, vertex.raw_y));
+                // Add editable fields here (e.g., using ui.add(egui::TextEdit::...))
             }
-            EditObject::LineDef(idx) => {
-                ui.label(format!("Editing Linedef {}", idx));
-                // ... linedef editing UI code ...
+            Selection::Line(linedef) => {
+                ui.label(format!("Linedef: {} to {}", linedef.start, linedef.end));
+                // Add editable fields for linedef properties
             }
-            // Handle other variants similarly...
-            _ => { ui.label("Editing other object types..."); }
+            Selection::Sector(sector) => {
+                ui.label(format!("Sector: floor {}, ceiling {}", sector.floorh, sector.ceilh));
+                // Add editable fields for sector properties
+            }
+            Selection::Thing(thing) => {
+                ui.label(format!("Thing: type {}", thing.thing_type));
+                // Add editable fields for thing properties
+            }
+            Selection::None => {
+                ui.label("Nothing selected");
+            }
         }
     }
-       
 
     // Stub: draws a grid
     fn draw_editor_grid(&self, _painter: &egui::Painter, _rect: egui::Rect) {

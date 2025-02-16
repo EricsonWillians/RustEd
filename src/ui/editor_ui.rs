@@ -4,6 +4,7 @@ use eframe::egui;
 
 use crate::editor::instance::Instance;
 use crate::document::Document;
+use crate::map::{LineDef, Vertex};
 use parking_lot::RwLock;
 
 impl Instance {
@@ -27,7 +28,6 @@ impl Instance {
 
     fn generate_test_map(&mut self) {
         // Create a simple test map for debugging
-        use crate::document::{Vertex, LineDef};
         use std::sync::Arc;
         
         let document = Arc::new(RwLock::new(Document::new()));

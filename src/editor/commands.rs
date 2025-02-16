@@ -1,9 +1,14 @@
-use crate::document::{Document, Vertex, LineDef, Sector, Thing};
+use crate::document::Document;
 use std::sync::Arc;
+
+use crate::map::{LineDef, Vertex, Sector, Thing};
 
 pub trait Command {
     fn execute(&self, document: &mut Document) -> Result<(), String>;
     fn unexecute(&self, document: &mut Document) -> Result<(), String>;
+    fn undo(&self, document: &mut Document) -> Result<(), String> {
+        self.unexecute(document)
+    }
 }
 
 #[derive(Clone, Debug)]

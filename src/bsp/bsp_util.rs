@@ -1,7 +1,7 @@
 // src/bsp/bsp_util.rs
 // Geometry and other helper functions specific to BSP.
 
-use crate::bsp::{Seg, EPSILON}; // Import from the bsp module
+use crate::bsp::Seg; // Import from the bsp module
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq)] // Add PartialEq
@@ -15,62 +15,70 @@ impl Point2D {
         Point2D { x, y }
     }
 }
-
-
-#[derive(Debug, Clone, Copy)] // Add Copy and Clone since it's just two f64 values.
+#[derive(Debug)]
 pub struct Line2D {
     pub start: Point2D,
     pub end: Point2D,
 }
 
-
 impl Line2D {
     pub fn new(start: Point2D, end: Point2D) -> Self {
         Line2D { start, end }
     }
-
-    pub fn from_seg(seg: &Seg) -> Self{
-        Line2D{start: seg.start, end: seg.end}
-    }
-
-    // Classify a point against the line
     pub fn classify_point(&self, point: &Point2D) -> f64 {
-        (point.y - self.start.y) * (self.end.x - self.start.x)
-            - (point.x - self.start.x) * (self.end.y - self.start.y)
+        // Returns positive if point is on front side
+        // Returns negative if point is on back side
+        // Returns near zero if point is on the line
+        let dx = self.end.x - self.start.x;
+        let dy = self.end.y - self.start.y;
+        (dy * (point.x - self.start.x)) - (dx * (point.y - self.start.y))
     }
-    
+    pub fn from_seg(seg: &Arc<Seg>) -> Self {
+        Line2D::new(Point2D::new(seg.start.x, seg.start.y), Point2D::new(seg.end.x, seg.end.y))
+    }
     pub fn intersect(&self, other: &Line2D) -> Option<Point2D> {
-        let a1 = self.end.y - self.start.y;
-        let b1 = self.start.x - self.end.x;
-        let c1 = a1 * self.start.x + b1 * self.start.y;
+        let d1 = self.classify_point(&other.start);
+        let d2 = self.classify_point(&other.end);
+        let d3 = other.classify_point(&self.start);
+        let d4 = other.classify_point(&self.end);
 
-        let a2 = other.end.y - other.start.y;
-        let b2 = other.start.x - other.end.x;
-        let c2 = a2 * other.start.x + b2 * other.start.y;
+        if (d1 * d2) < 0.0 && (d3 * d4) < 0.0 {
+            // Calculate intersection point
+            let x1 = self.start.x;
+            let y1 = self.start.y;
+            let x2 = self.end.x;
+            let y2 = self.end.y;
+            let x3 = other.start.x;
+            let y3 = other.start.y;
+            let x4 = other.end.x;
+            let y4 = other.end.y;
 
-        let det = a1 * b2 - a2 * b1;
-        if det.abs() < EPSILON { // Lines are parallel (or coincident)
-            return None;
+            let denominator = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+            let t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denominator;
+
+            let x = x1 + t * (x2 - x1);
+            let y = y1 + t * (y2 - y1);
+
+            Some(Point2D::new(x, y))
+        } else if d1 == 0.0 && self.on_segment(&other.start) {
+            Some(other.start)
+        } else if d2 == 0.0 && self.on_segment(&other.end) {
+            Some(other.end)
+        } else if d3 == 0.0 && (*other).on_segment(&self.start) {
+            Some(self.start)
+        } else if d4 == 0.0 && (*other).on_segment(&self.end) {
+            Some(self.end)
+        } else {
+            None
         }
-
-        let x = (b2 * c1 - b1 * c2) / det;
-        let y = (a1 * c2 - a2 * c1) / det;
-
-        // Check if the intersection point lies on both segments
-        if x < self.start.x.min(self.end.x) - EPSILON || x > self.start.x.max(self.end.x) + EPSILON ||
-           y < self.start.y.min(self.end.y) - EPSILON || y > self.start.y.max(self.end.y) + EPSILON {
-            return None;
-        }
-        if x < other.start.x.min(other.end.x) - EPSILON || x > other.start.x.max(other.end.x) + EPSILON ||
-           y < other.start.y.min(other.end.y) - EPSILON || y > other.start.y.max(other.end.y) + EPSILON {
-            return None
-        }
-
-
-        Some(Point2D::new(x, y))
     }
-}
-
+    pub fn on_segment(&self, point: &Point2D) -> bool {
+        point.x <= self.start.x.max(self.end.x)
+            && point.x >= self.start.x.min(self.end.x)
+            && point.y <= self.start.y.max(self.end.y)
+            && point.y >= self.start.y.min(self.end.y)
+    }
+}   
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BoundingBox {
     pub min_x: f64,

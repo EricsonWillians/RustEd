@@ -4,12 +4,15 @@ use parking_lot::RwLock;
 
 use crate::{
     bsp::{
-        BspNode, SegPosition, Line2D, BoundingBox,
+        BspNode, SegPosition, BoundingBox,
         EPSILON, BLOCK_SIZE, Point2D, BSP_DEPTH_LIMIT
     },
-    document::{Document, LineDef, Vertex, Sector},
+    document::Document,
 };
 
+use crate::bsp::bsp_util::Line2D;
+
+use crate::map::{LineDef, Vertex, Sector};
 #[derive(Debug, Clone)]
 pub struct Seg {
     pub start: Point2D,
@@ -252,7 +255,7 @@ impl BspLevel {
         if segs.is_empty() {
             return Err("No segs to partition".into());
         }
-        Ok(Line2D::from_seg(&segs[0]))
+        Ok(Line2D::new(segs[0].start, segs[0].end))
     }
 
     fn split_list(
@@ -295,9 +298,10 @@ impl BspLevel {
         }
     }
 
-    fn split_seg(&self, seg: &Seg, line: &Line2D) -> Result<(Option<Seg>, Option<Seg>), String> {
+    fn split_seg(&self, seg: &Arc<Seg>, line: &Line2D) -> Result<(Option<Seg>, Option<Seg>), String> {
         let seg_line = Line2D::from_seg(seg);
-        if let Some(intersect) = line.intersect(&seg_line) {
+        if let Some(Point2D { x: ix, y: iy }) = line.intersect(&seg_line) {
+            let intersect = Point2D::new(ix, iy);
             let front_seg = Seg {
                 start: seg.start,
                 end: intersect,

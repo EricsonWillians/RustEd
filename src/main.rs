@@ -16,14 +16,11 @@ use env_logger;
 use log::info;
 use std::error::Error;
 
-mod bsp;
-mod document;
-mod editor;
-mod platform;
-mod ui;
-mod utils;
+use rust_ed::*;
 
-/// Perform any platform-specific initialization.
+use ui::main_window::{MainWindow, WindowConfig};
+
+/// Perform any platform-specific initialization (Windows, Linux, etc.).
 fn init_platform() {
     #[cfg(target_os = "windows")]
     {
@@ -35,23 +32,28 @@ fn init_platform() {
     }
 }
 
-/// A minimal application that embeds the editor. Here we use a stub application
-/// that launches an egui window. In a full implementation, you would integrate your
-/// editor instance.
-struct RustEdApp {}
+/// The EGUI/eframe application struct that owns a `MainWindow`.
+///
+/// `eframe::App` requires an `update(&mut self, &egui::Context, &mut eframe::Frame)` method,
+/// which we'll forward to our `MainWindow`.
+struct RustEdApp {
+    main_window: MainWindow,
+}
 
-impl Default for RustEdApp {
-    fn default() -> Self {
-        RustEdApp {}
+impl RustEdApp {
+    fn new() -> Self {
+        // You can load config from a file or use defaults:
+        let config = WindowConfig::default();
+        let main_window = MainWindow::new(config);
+
+        RustEdApp { main_window }
     }
 }
 
 impl eframe::App for RustEdApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("RustEd Editor");
-            ui.label("Editor is running. Press ESC to exit.");
-        });
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Delegate all UI updates to your MainWindow struct
+        self.main_window.update(ctx, frame);
     }
 }
 
@@ -63,16 +65,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Perform platform-specific initialization.
     init_platform();
 
-    // Set native options for the egui window.
+    // Define windowing options (size, vsync, icon, etc.)
     let native_options = eframe::NativeOptions::default();
 
-    // Run the egui application.
+    // Launch eframe with our RustEdApp.
     eframe::run_native(
         "RustEd Editor",
         native_options,
-        Box::new(|_cc| Box::new(RustEdApp::default())),
+        Box::new(|_cc| Box::new(RustEdApp::new())),
     );
-    // run_native returns () so we simply return Ok.
+
     info!("RustEd exiting.");
     Ok(())
 }
