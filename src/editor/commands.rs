@@ -1,12 +1,14 @@
+// src/editor/commands.rs
+
 use crate::document::Document;
 use std::sync::Arc;
 
 use crate::map::{LineDef, Vertex, Sector, Thing};
 
 pub trait Command {
-    fn execute(&self, document: &mut Document) -> Result<(), String>;
-    fn unexecute(&self, document: &mut Document) -> Result<(), String>;
-    fn undo(&self, document: &mut Document) -> Result<(), String> {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String>;
+    fn unexecute(&mut self, document: &mut Document) -> Result<(), String>;
+    fn undo(&mut self, document: &mut Document) -> Result<(), String> {
         self.unexecute(document)
     }
 }
@@ -16,7 +18,7 @@ pub enum CommandType {
     AddVertex {
         x: i32,
         y: i32,
-        vertex_id: Option<usize>,
+        vertex_id: Option<usize>, // Keep this as Option<usize>
     },
     MoveVertex {
         vertex_id: usize,
@@ -34,7 +36,7 @@ pub enum CommandType {
         end_vertex_id: usize,
         right_side_sector_id: i16,
         left_side_sector_id: i16,
-        linedef_id: Option<usize>,
+        linedef_id: Option<usize>, // Keep this as Option<usize>
     },
     DeleteLineDef {
         linedef_id: usize,
@@ -47,7 +49,7 @@ pub enum CommandType {
         ceiling_texture: String,
         light_level: u8,
         sector_type: u8,
-        sector_id: Option<usize>,
+        sector_id: Option<usize>, // Keep this as Option<usize>
     },
     DeleteSector {
         sector_id: usize,
@@ -59,30 +61,37 @@ pub enum CommandType {
         angle: i32,
         thing_type: u16,
         options: u16,
-        thing_id: Option<usize>,
+        thing_id: Option<usize>, // Keep this as Option<usize>
     },
     DeleteThing {
         thing_id: usize,
         thing: Option<Arc<Thing>>,
     },
+    BatchCommand { commands: Vec<CommandType> },
     // Add more command variants as needed (e.g., ChangeSectorProperties, etc.)
 }
 
 impl Command for Box<dyn Command> {
-    fn execute(&self, document: &mut Document) -> Result<(), String> {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         (**self).execute(document)
     }
-    fn unexecute(&self, document: &mut Document) -> Result<(), String> {
+    fn unexecute(&mut self, document: &mut Document) -> Result<(), String> {
         (**self).unexecute(document)
     }
 }
 
 impl Command for CommandType {
-    fn execute(&self, document: &mut Document) -> Result<(), String> {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         match self {
-            CommandType::AddVertex { x, y, vertex_id: _ } => {
-                let _id = document.add_vertex(*x, *y);
-                // (Consider storing `id` if you want to support unexecute.)
+            CommandType::BatchCommand { ref mut commands } => {
+                for command in commands {
+                    command.execute(document)?;
+                }
+                Ok(())
+            }
+            CommandType::AddVertex { x, y, ref mut vertex_id } => {
+                let id = document.add_vertex(*x, *y);
+                *vertex_id = Some(id); // Assign the ID *within* the Option
                 Ok(())
             }
             CommandType::MoveVertex { vertex_id, new_x, new_y, .. } => {
@@ -99,14 +108,15 @@ impl Command for CommandType {
                 end_vertex_id,
                 right_side_sector_id,
                 left_side_sector_id,
-                linedef_id: _,
+                ref mut linedef_id,
             } => {
-                document.add_linedef(
+                let id = document.add_linedef(
                     *start_vertex_id,
                     *end_vertex_id,
                     *right_side_sector_id,
                     *left_side_sector_id,
                 );
+                *linedef_id = Some(id); // Assign ID *within* the Option
                 Ok(())
             }
             CommandType::DeleteLineDef { linedef_id, linedef: _ } => {
@@ -122,9 +132,9 @@ impl Command for CommandType {
                 ref ceiling_texture,
                 light_level,
                 sector_type,
-                sector_id: _,
+                ref mut sector_id,
             } => {
-                document.add_sector(
+               let id = document.add_sector(
                     *floor_z,
                     *ceiling_z,
                     floor_texture.clone(),
@@ -132,6 +142,7 @@ impl Command for CommandType {
                     *light_level,
                     *sector_type,
                 );
+                *sector_id = Some(id);  // Assign ID *within* the Option
                 Ok(())
             }
             CommandType::DeleteSector { sector_id, sector: _ } => {
@@ -146,9 +157,10 @@ impl Command for CommandType {
                 angle,
                 thing_type,
                 options,
-                thing_id: _,
+                ref mut thing_id,
             } => {
-                document.add_thing(*x, *y, *angle, *thing_type, *options);
+                let id = document.add_thing(*x, *y, *angle, *thing_type, *options);
+                *thing_id = Some(id); // Assign ID *within* the Option
                 Ok(())
             }
             CommandType::DeleteThing { thing_id, thing: _ } => {
@@ -160,7 +172,7 @@ impl Command for CommandType {
         }
     }
 
-    fn unexecute(&self, document: &mut Document) -> Result<(), String> {
+    fn unexecute(&mut self, document: &mut Document) -> Result<(), String> {
         match self {
             CommandType::AddVertex { x: _, y: _, vertex_id } => {
                 if let Some(id) = *vertex_id {
@@ -253,6 +265,12 @@ impl Command for CommandType {
                     Err("DeleteThing command had no stored vertex".into())
                 }
             }
+            CommandType::BatchCommand { ref mut commands } => {
+                for command in commands {
+                    command.execute(document)?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -268,15 +286,15 @@ impl BatchCommand {
 }
 
 impl Command for BatchCommand {
-    fn execute(&self, document: &mut Document) -> Result<(), String> {
-        for command in &self.commands {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
+        for command in &mut self.commands {
             command.execute(document)?;
         }
         Ok(())
     }
 
-    fn unexecute(&self, document: &mut Document) -> Result<(), String> {
-        for command in self.commands.iter().rev() {
+    fn unexecute(&mut self, document: &mut Document) -> Result<(), String> {
+        for command in self.commands.iter_mut().rev() {
             command.unexecute(document)?;
         }
         Ok(())

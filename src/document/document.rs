@@ -64,6 +64,8 @@ pub struct Document {
     pub wad_data: Arc<RwLock<Option<Vec<u8>>>>,
 
     pub map_name: String,
+
+    pub dirty: bool,
 }
 
 
@@ -101,6 +103,7 @@ impl Document {
             selected_level: Arc::new(RwLock::new(None)),
             wad_data: Arc::new(RwLock::new(None)),
             map_name: String::new(),
+            dirty: false,
         }
     }
 

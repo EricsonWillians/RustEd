@@ -1,4 +1,4 @@
-// src/editor/editor.rs
+// src/editor/core.rs
 
 use std::fs::File;
 use std::io::Cursor;
@@ -13,6 +13,7 @@ use crate::bsp::BspLevel;
 use crate::document::Document;
 use crate::editor::commands::{Command, CommandType};
 use crate::ui::central_panel::CentralPanel;
+use eframe::egui; // Import egui
 
 /// Tools for the editor, e.g. Select, DrawLine, etc.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -71,6 +72,8 @@ pub struct Editor {
 
     /// We store a built BSP here (instead of the Document).
     bsp_level: Option<Arc<BspLevel>>,
+
+    last_vertex_id: Option<usize>,
 }
 
 impl Editor {
@@ -87,6 +90,7 @@ impl Editor {
             show_bsp_debug: false,
             central_panel: None,
             bsp_level: None,
+            last_vertex_id: None,
         }
     }
 
@@ -142,12 +146,12 @@ impl Editor {
     }
 
     /// Execute a command, handle errors, and reset redo stack on success.
-    pub fn execute_command(&mut self, command: Box<dyn Command>) {
+    pub fn execute_command(&mut self, mut command: Box<dyn Command>) { // Take ownership
         if let Some(doc_arc) = &self.document {
             let mut doc = doc_arc.write();
-            match command.execute(&mut doc) {
+            match command.execute(&mut doc) { // Execute on the mutable reference
                 Ok(_) => {
-                    self.command_history.push(command);
+                    self.command_history.push(command);  // Now push the potentially modified command
                     self.redo_stack.clear();
                 }
                 Err(err) => {
@@ -389,30 +393,117 @@ impl Editor {
         screen_pos // fallback: no transform
     }
 
-    /// If user clicks on the central panel, handle it. For now, we just do different logic by tool.
-    pub fn handle_click(&mut self, world_pos: egui::Pos2) {
+    /// Handles raw input events from the CentralPanel.
+    /// Handles raw input events from the CentralPanel.
+    pub fn handle_input(
+        &mut self,
+        world_pos: egui::Pos2,
+        primary_clicked: bool,
+        secondary_clicked: bool,
+        middle_clicked: bool,
+        is_dragging: bool,
+        drag_delta: egui::Vec2,
+        modifiers: egui::Modifiers,
+    ) {
         match self.current_tool {
-            Tool::DrawLine => {
-                // Example command: add a vertex at the clicked position
-                let cmd = CommandType::AddVertex {
-                    x: world_pos.x as i32,
-                    y: world_pos.y as i32,
-                    vertex_id: None,
-                };
-                self.execute_command(Box::new(cmd));
-            }
             Tool::Select => {
-                // TODO: implement actual selection logic
+                if primary_clicked {
+                    // Selection logic (using world_pos) goes here.
+                    println!("Select tool click at: {:?}", world_pos);
+                }
+            }
+            Tool::DrawLine => {
+                if primary_clicked {
+                    // First click: add a vertex.
+                    let cmd = CommandType::AddVertex {
+                        x: world_pos.x as i32,
+                        y: world_pos.y as i32,
+                        vertex_id: None,
+                    };
+                    self.execute_command(Box::new(cmd));
+                    self.last_vertex_id = self.document.as_ref().and_then(|doc| {
+                        let doc = doc.read();
+                        let vertices = doc.vertices.read();
+                        vertices.last().map(|_| vertices.len() - 1)
+                    });
+                } else if is_dragging && self.last_vertex_id.is_some(){
+                    // While dragging: add a vertex AND a linedef.
+                    let vertex_cmd = CommandType::AddVertex {
+                        x: world_pos.x as i32,
+                        y: world_pos.y as i32,
+                        vertex_id: None,
+                    };
+                    
+                    let start_vertex_id = self.last_vertex_id.unwrap();
+                    let mut end_vertex_id: Option<usize> = None; // store new vertex id here
+                    
+                    // Use batch command
+                    let batch_cmd = CommandType::BatchCommand{
+                        commands: vec![
+                            vertex_cmd,
+                            CommandType::AddLineDef {
+                                start_vertex_id,
+                                end_vertex_id: 0, // Temporary value, will be updated
+                                right_side_sector_id: -1,  //  placeholders
+                                left_side_sector_id: -1,   //  placeholders
+                                linedef_id: None,
+                            }
+                        ]
+                    };
+                    self.execute_command(Box::new(batch_cmd));
+                    
+                    self.last_vertex_id = self.document.as_ref().and_then(|doc| {
+                        let doc = doc.read();
+                        let vertices = doc.vertices.read();
+                        vertices.last().map(|_| vertices.len() - 1)
+                    });
+                }
+
+                if secondary_clicked {
+                    self.cancel_current_operation();
+                }
             }
             Tool::DrawShape => {
-                // e.g. draw a rectangular sector
+                // Implement shape drawing logic.
+                if primary_clicked {
+                    println!("Draw Shape tool click at: {:?}", world_pos);
+                }
             }
             Tool::EditThings => {
-                // e.g. add or move a thing
+                // Implement thing editing logic (add, move, delete).
+                 if primary_clicked {
+                    println!("Edit things click at: {:?}", world_pos);
+                }
             }
             Tool::EditSectors => {
-                // e.g. edit sector properties
+                // Implement sector editing logic.
+                 if primary_clicked {
+                    println!("Edit sectors click at: {:?}", world_pos);
+                }
             }
+        }
+        if primary_clicked {
+            println!("Primary click at: {:?}", world_pos);
+        }
+        if secondary_clicked {
+            println!("Secondary click at: {:?}", world_pos);
+        }
+        if middle_clicked {
+            println!("Middle click at: {:?}", world_pos);
+        }
+        if is_dragging {
+            // Example: If dragging with the Select tool, you might
+            // implement rubber-band selection.
+            println!("Dragging: delta {:?}", drag_delta);
+        }
+         if modifiers.shift {
+            println!("Shift key pressed");
+        }
+        if modifiers.ctrl {
+            println!("Ctrl key pressed");
+        }
+        if modifiers.alt {
+            println!("Alt key pressed");
         }
     }
 

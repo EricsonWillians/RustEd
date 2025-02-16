@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 
 use crate::bsp::debug_viz::BspDebugger;
 use crate::document::Document;
-use crate::editor::core::{Editor, Selection, Tool};
+use crate::editor::core::{Editor, Selection, Tool}; 
 use crate::map::{LineDef, Vertex, Thing};
 
 /// CentralPanel is the main view in your UI, handling:
@@ -55,14 +55,24 @@ impl CentralPanel {
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
 
-                // Let user drag in this area (for pan)
-                let response = ui.interact(rect, ui.id(), Sense::click_and_drag());
+                // --- Conditional Drag Handling ---
+                let response = if self.editor.read().current_tool() == Tool::Select {
+                    // Only interact for dragging (panning) if the Select tool is active.
+                    ui.interact(rect, ui.id(), Sense::drag())
+                } else {
+                    // If a different tool is active, don't interact for dragging.
+                    // We still need a response, so create a dummy one.
+                    ui.interact(rect, ui.id(), Sense::hover()) // Use Sense::hover()
+
+                };
 
                 // Mouse wheel zoom
                 self.handle_zoom(ui, &response);
 
-                // Mouse drag pan
-                self.handle_pan(&response);
+                // Mouse drag pan (now conditional, only active with Select tool)
+                if self.editor.read().current_tool() == Tool::Select { //pan only in select mode
+                    self.handle_pan(&response);
+                }
 
                 // Fill background
                 let painter = ui.painter_at(rect);
@@ -76,25 +86,41 @@ impl CentralPanel {
                     self.draw_map(&painter, &doc_arc, rect, ui);
                 }
 
-                // Hover detection
+                // Hover detection AND input handling.  Do this *AFTER* drawing.
                 if rect.contains(ui.input().pointer.hover_pos().unwrap_or_default()) {
-                    if let Some(mouse_pos) = ui.input().pointer.hover_pos() {
-                        self.update_hover(mouse_pos);
+                   if let Some(mouse_pos) = ui.input().pointer.hover_pos() {
+                       self.update_hover(mouse_pos);
+
+                        // Pass input to Editor
+                        let world_pos = self.screen_to_world(mouse_pos);
+                        let mut editor = self.editor.write();
+                        editor.handle_input(
+                            world_pos,
+                            ui.input().pointer.primary_clicked(),
+                            ui.input().pointer.secondary_clicked(),
+                            ui.input().pointer.button_clicked(egui::PointerButton::Middle),
+                            ui.input().pointer.button_down(egui::PointerButton::Primary),
+                            ui.input().pointer.delta(),
+                            ui.input().modifiers, // Include modifier keys (Shift, Ctrl, Alt)
+                        );
+
                     } else {
-                        self.hovered_selection = Selection::None;
+                      self.hovered_selection = Selection::None;
                     }
                 } else {
                     self.hovered_selection = Selection::None;
                 }
 
-                // Handle clicks
-                if response.clicked() {
-                    if let Some(pos) = ui.input().pointer.interact_pos() {
-                        self.handle_click(pos);
+                // Check dirty flag and request repaint
+                if let Some(doc_arc) = self.editor.read().document() {
+                    let doc = doc_arc.read();
+                    if doc.dirty {
+                        ctx.request_repaint();
+                        // Reset the dirty flag *AFTER* drawing and potentially other UI updates
+                        drop(doc);  // Explicitly drop read lock before acquiring write lock
+                        doc_arc.write().dirty = false; // Only modify through write lock
                     }
                 }
-
-                // Possibly show a BSP debug overlay
                 if self.show_bsp_debug {
                     self.show_bsp_debug_window(ctx);
                 }
@@ -303,21 +329,6 @@ impl CentralPanel {
                 }
             }
         }
-    }
-
-    /// If user clicked, pass it to Editor, or do selection logic.
-    fn handle_click(&self, screen_pos: Pos2) {
-        let world_pos = self.screen_to_world(screen_pos);
-        let mut ed = self.editor.write();
-
-        // If something is hovered, you might do:
-        if !matches!(self.hovered_selection, Selection::None) {
-            // e.g. a direct "select" call:
-            // ed.select(self.hovered_selection.clone());
-            // For now, we just call `ed.handle_click(world_pos)` to let the Editor decide.
-        }
-
-        ed.handle_click(world_pos);
     }
 
     //--- Debugging the BSP, if you have that system in place ---
