@@ -1,12 +1,14 @@
 // src/document/document.rs
 
 use crate::map::{LineDef, Sector, SideDef, Thing, Vertex};
+use crate::bsp::BspLevel;
 use parking_lot::RwLock;
 use rayon::prelude::*;
 use std::io::{self, Read, Seek, SeekFrom, Cursor};
 use std::str;
 use std::sync::Arc;
 use byteorder::{LE, ReadBytesExt};
+use log::{error, info};
 
 #[derive(Debug, Clone, Copy)]
 pub enum ObjType {
@@ -60,6 +62,8 @@ pub struct Document {
     pub levels: Arc<RwLock<Vec<LevelInfo>>>,
     pub selected_level: Arc<RwLock<Option<String>>>,
     pub wad_data: Arc<RwLock<Option<Vec<u8>>>>,
+
+    pub map_name: String,
 }
 
 const FILELUMP_SIZE: usize = 16; // 4 bytes (filepos) + 4 bytes (size) + 8 bytes (name)
@@ -82,6 +86,7 @@ impl Document {
             levels: Arc::new(RwLock::new(Vec::new())),
             selected_level: Arc::new(RwLock::new(None)),
             wad_data: Arc::new(RwLock::new(None)),
+            map_name: String::new(),
         }
     }
 
@@ -117,7 +122,7 @@ impl Document {
     /// Adds a vertex and returns its index.
     pub fn add_vertex(&mut self, x: i32, y: i32) -> usize {
         let mut vertices = self.vertices.write();
-        let new_vertex = Arc::new(Vertex { raw_x: x, raw_y: y });
+        let new_vertex = Arc::new(Vertex { x, y });
         vertices.push(new_vertex);
         vertices.len() - 1
     }
@@ -127,8 +132,8 @@ impl Document {
         let mut vertices = self.vertices.write();
         if let Some(vertex) = vertices.get_mut(vertex_id) {
             let vertex_ref = Arc::make_mut(vertex);
-            vertex_ref.raw_x = new_x;
-            vertex_ref.raw_y = new_y;
+            vertex_ref.x = new_x;
+            vertex_ref.y = new_y;
             Ok(())
         } else {
             Err(format!("Vertex with ID {} not found", vertex_id))
@@ -141,13 +146,20 @@ impl Document {
         if vertex_id < vertices.len() {
             let removed = vertices.remove(vertex_id);
             {
+                // Adjust all linedefs that reference any vertex > vertex_id.
                 let mut linedefs = self.linedefs.write();
                 for linedef_arc in linedefs.iter_mut() {
                     let linedef = Arc::make_mut(linedef_arc);
-                    if linedef.start > vertex_id { linedef.start -= 1; }
-                    if linedef.end > vertex_id { linedef.end -= 1; }
+                    if linedef.start > vertex_id {
+                        linedef.start -= 1;
+                    }
+                    if linedef.end > vertex_id {
+                        linedef.end -= 1;
+                    }
                 }
             }
+            // Arc::try_unwrap(...) returns the underlying Vertex if we
+            // were the only Arc holder. We assume we are.
             Some(Arc::try_unwrap(removed).unwrap())
         } else {
             None
@@ -184,12 +196,12 @@ impl Document {
     pub fn add_sector(&mut self, floor_z: i32, ceiling_z: i32, floor_texture: String, ceiling_texture: String, light_level: u8, sector_type: u8) -> usize {
         let mut sectors = self.sectors.write();
         let new_sector = Arc::new(Sector {
-            floorh: floor_z,
-            ceilh: ceiling_z,
+            floor_height: floor_z,
+            ceiling_height: ceiling_z,
             floor_tex: floor_texture,
-            ceil_tex: ceiling_texture,
+            ceiling_tex: ceiling_texture,
             light: light_level as i32,
-            sector_type: sector_type as i32,
+            r#type: sector_type as i32,
             tag: 0,
         });
         sectors.push(new_sector);
@@ -207,14 +219,14 @@ impl Document {
     }
 
     /// Adds a thing.
-    pub fn add_thing(&mut self, x: i32, y: i32, angle: i32, thing_type: u16, options: u16) -> usize {
+    pub fn add_thing(&mut self, x: i32, y: i32, angle: i32, doom_type: u16, flags: u16) -> usize {
         let mut things = self.things.write();
         let new_thing = Arc::new(Thing {
-            raw_x: x,
-            raw_y: y,
-            angle: angle as i32,
-            thing_type: thing_type as i32,
-            options: options as i32,
+            x,
+            y,
+            angle,
+            doom_type: doom_type as i32,
+            flags: flags as i32,
         });
         things.push(new_thing);
         things.len() - 1
@@ -282,8 +294,8 @@ impl Document {
         let vertices = self.vertices.read();
         let start = &vertices[line.start];
         let end = &vertices[line.end];
-        let dx = (start.raw_x - end.raw_x) as f64;
-        let dy = (start.raw_y - end.raw_y) as f64;
+        let dx = (start.x - end.x) as f64;
+        let dy = (start.y - end.y) as f64;
         dx.hypot(dy)
     }
 
@@ -292,7 +304,7 @@ impl Document {
         let vertices = self.vertices.read();
         let start = &vertices[line.start];
         let end = &vertices[line.end];
-        start.raw_x == end.raw_x && start.raw_y == end.raw_y
+        start.x == end.x && start.y == end.y
     }
 
     /// Returns true if the linedef touches the given coordinate.
@@ -300,7 +312,7 @@ impl Document {
         let vertices = self.vertices.read();
         let start = &vertices[line.start];
         let end = &vertices[line.end];
-        start.matches(tx, ty) || end.matches(tx, ty)
+        (start.x == tx && start.y == ty) || (end.x == tx && end.y == ty)
     }
 
     /// Returns true if the linedef touches the given sector.
@@ -308,12 +320,16 @@ impl Document {
         let sidedefs = self.sidedefs.read();
         if line.right >= 0 {
             if let Some(sd) = sidedefs.get(line.right as usize) {
-                if sd.sector as i32 == sec_num { return true; }
+                if sd.sector as i32 == sec_num {
+                    return true;
+                }
             }
         }
         if line.left >= 0 {
             if let Some(sd) = sidedefs.get(line.left as usize) {
-                if sd.sector as i32 == sec_num { return true; }
+                if sd.sector as i32 == sec_num {
+                    return true;
+                }
             }
         }
         false
@@ -334,24 +350,24 @@ impl Document {
     /// Returns true if the linedef is horizontal.
     pub fn is_horizontal(&self, line: &LineDef) -> bool {
         let vertices = self.vertices.read();
-        vertices[line.start].raw_y == vertices[line.end].raw_y
+        vertices[line.start].y == vertices[line.end].y
     }
 
     /// Returns true if the linedef is vertical.
     pub fn is_vertical(&self, line: &LineDef) -> bool {
         let vertices = self.vertices.read();
-        vertices[line.start].raw_x == vertices[line.end].raw_x
+        vertices[line.start].x == vertices[line.end].x
     }
 
     /// Returns true if the linedef’s sidedefs reference the same sector.
     pub fn is_self_ref(&self, line: &LineDef) -> bool {
         if line.left >= 0 && line.right >= 0 {
             let sidedefs = self.sidedefs.read();
-            if let (Some(left), Some(right)) = (
+            if let (Some(left_sd), Some(right_sd)) = (
                 sidedefs.get(line.left as usize),
                 sidedefs.get(line.right as usize)
             ) {
-                return left.sector == right.sector;
+                return left_sd.sector == right_sd.sector;
             }
         }
         false
@@ -474,10 +490,10 @@ impl Document {
         let name = name.trim();
         let upper = name.to_uppercase();
         if upper.starts_with("MAP") && upper.len() >= 5 {
-            upper.chars().skip(3).take(2).all(|c| c.is_digit(10))
-        } else if upper.len() == 4 && upper.starts_with("E") && upper.chars().nth(2) == Some('M') {
-            upper.chars().nth(1).map_or(false, |c| c.is_digit(10)) &&
-            upper.chars().nth(3).map_or(false, |c| c.is_digit(10))
+            upper.chars().skip(3).take(2).all(|c| c.is_ascii_digit())
+        } else if upper.len() == 4 && upper.starts_with('E') && upper.chars().nth(2) == Some('M') {
+            upper.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) &&
+            upper.chars().nth(3).map_or(false, |c| c.is_ascii_digit())
         } else {
             false
         }
@@ -494,8 +510,8 @@ impl Document {
         let mut max_x = f32::MIN;
         let mut max_y = f32::MIN;
         for vertex in vertices.iter() {
-            let x = vertex.raw_x as f32;
-            let y = vertex.raw_y as f32;
+            let x = vertex.x as f32;
+            let y = vertex.y as f32;
             if x < min_x { min_x = x; }
             if y < min_y { min_y = y; }
             if x > max_x { max_x = x; }
@@ -543,7 +559,7 @@ impl Document {
     // --- Lump-loading helper functions ---
 
     fn load_things<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
-        // Each thing record is 10 bytes.
+        // Each thing record is 10 bytes (classic DOOM).
         if size % 10 != 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "THINGS lump size is not a multiple of 10"));
         }
@@ -604,8 +620,8 @@ impl Document {
         sidedefs.clear();
         sidedefs.reserve(num_sidedefs as usize);
         for _ in 0..num_sidedefs {
-            let sidedef = SideDef::from_wad(reader)?;
-            sidedefs.push(Arc::new(sidedef));
+            let sd = SideDef::from_wad(reader)?;
+            sidedefs.push(Arc::new(sd));
         }
         Ok(())
     }
@@ -621,8 +637,8 @@ impl Document {
         linedefs.clear();
         linedefs.reserve(num_linedefs as usize);
         for _ in 0..num_linedefs {
-            let linedef = LineDef::from_wad(reader)?;
-            linedefs.push(Arc::new(linedef));
+            let ld = LineDef::from_wad(reader)?;
+            linedefs.push(Arc::new(ld));
         }
         Ok(())
     }
@@ -646,7 +662,7 @@ impl Document {
     // --- Sector relationships and geometry helper methods ---
 
     pub fn get_sector_from_side(&self, side: &SideDef) -> Option<Arc<Sector>> {
-        self.sectors.read().get(side.sector).cloned()
+        self.sectors.read().get(side.sector as usize).cloned()
     }
 
     pub fn get_sector_id(&self, line: &LineDef, side: Side) -> i32 {
@@ -679,6 +695,98 @@ impl Document {
             None
         }
     }
+
+    // (Optional) For demonstration or testing
+    #[allow(unused)] // remove this if you use it
+    pub fn build_bsp(&self) -> Option<BspLevel> {
+        // This is just a stub for if you actually build a BSP.
+        // Return None or Some(BspLevel) as needed.
+        None
+    }
+
+    /// A small helper field for the "generate_test_map" example.
+    /// This might not exist in your code. Remove or adapt as needed.
+
+    /// Generate a simple test map (square room) for demonstration.
+    /// Adjust or remove as needed.
+    pub fn generate_test_map(&mut self) {
+        // Clear existing data
+        self.clear_geometry();
+
+        // Add vertices for a simple square
+        let mut v_lock = self.vertices.write();
+        let v0 = v_lock.len() as i16;
+        v_lock.push(Arc::new(Vertex::new(-100, -100)));
+        v_lock.push(Arc::new(Vertex::new(100, -100)));
+        v_lock.push(Arc::new(Vertex::new(100, 100)));
+        v_lock.push(Arc::new(Vertex::new(-100, 100)));
+        drop(v_lock);
+
+        // Add a single sector
+        let mut s_lock = self.sectors.write();
+        let s0 = s_lock.len() as i16;
+        s_lock.push(Arc::new(Sector::new(
+            0,  // floor height
+            128, // ceiling height
+            "FLOOR4_8".into(),
+            "CEIL3_5".into(),
+            160, // light
+            0,   // type
+            0,   // tag
+        )));
+        drop(s_lock);
+
+        // Add sidedef
+        let mut sd_lock = self.sidedefs.write();
+        let sd0 = sd_lock.len() as i16;
+        sd_lock.push(Arc::new(SideDef::new(
+            0, 0,
+            "STARTAN2".into(),
+            "STARTAN2".into(),
+            "STARG3".into(),
+            s0 as i32,
+        )));
+        drop(sd_lock);
+
+        // Add linedefs for the square
+        let mut l_lock = self.linedefs.write();
+        let l0 = l_lock.len() as i16;
+        // Each side references the same sidedef and sector on the "right"
+        l_lock.push(Arc::new(LineDef::new(
+            v0 as usize, (v0 + 1) as usize,
+            0, 0, 0, sd0 as i32, -1,
+        )));
+        l_lock.push(Arc::new(LineDef::new(
+            (v0 + 1) as usize, (v0 + 2) as usize,
+            0, 0, 0, sd0 as i32, -1,
+        )));
+        l_lock.push(Arc::new(LineDef::new(
+            (v0 + 2) as usize, (v0 + 3) as usize,
+            0, 0, 0, sd0 as i32, -1,
+        )));
+        l_lock.push(Arc::new(LineDef::new(
+            (v0 + 3) as usize, v0 as usize,
+            0, 0, 0, sd0 as i32, -1,
+        )));
+        drop(l_lock);
+
+        // Add a Thing (e.g., Player 1 start).
+        let mut t_lock = self.things.write();
+        t_lock.push(Arc::new(Thing::new(
+            0, // x
+            0, // y
+            0, // angle
+            1, // doom_type (player 1 start)
+            0, // flags
+        )));
+        drop(t_lock);
+
+        info!("Generated a simple test map.");
+        self.map_name = "TESTMAP".into();
+
+        // If you want to build a BSP right away, do it:
+        self.build_bsp();
+    }
 }
 
 // --- Checksum helper functions ---
@@ -688,28 +796,28 @@ fn add_crc(crc: &mut u32, value: i32) {
 }
 
 fn checksum_thing(crc: &mut u32, thing: &Thing) {
-    add_crc(crc, thing.raw_x);
-    add_crc(crc, thing.raw_y);
+    add_crc(crc, thing.x);
+    add_crc(crc, thing.y);
     add_crc(crc, thing.angle);
-    add_crc(crc, thing.thing_type);
-    add_crc(crc, thing.options);
+    add_crc(crc, thing.doom_type);
+    add_crc(crc, thing.flags);
 }
 
 fn checksum_vertex(crc: &mut u32, vertex: &Vertex) {
-    add_crc(crc, vertex.raw_x);
-    add_crc(crc, vertex.raw_y);
+    add_crc(crc, vertex.x);
+    add_crc(crc, vertex.y);
 }
 
 fn checksum_sector(crc: &mut u32, sector: &Sector) {
-    add_crc(crc, sector.floorh);
-    add_crc(crc, sector.ceilh);
+    add_crc(crc, sector.floor_height);
+    add_crc(crc, sector.ceiling_height);
     add_crc(crc, sector.light);
-    add_crc(crc, sector.sector_type);
+    add_crc(crc, sector.r#type);
     add_crc(crc, sector.tag);
     for byte in sector.floor_tex.as_bytes() {
         add_crc(crc, *byte as i32);
     }
-    for byte in sector.ceil_tex.as_bytes() {
+    for byte in sector.ceiling_tex.as_bytes() {
         add_crc(crc, *byte as i32);
     }
 }
@@ -726,7 +834,7 @@ fn checksum_sidedef(crc: &mut u32, sidedef: &SideDef) {
     for byte in sidedef.mid_tex.as_bytes() {
         add_crc(crc, *byte as i32);
     }
-    add_crc(crc, sidedef.sector as i32);
+    add_crc(crc, sidedef.sector);
 }
 
 fn checksum_linedef(crc: &mut u32, linedef: &LineDef, _doc: &Document) {

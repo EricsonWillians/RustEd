@@ -1,3 +1,5 @@
+// src/bsp/bsp_level.rs
+
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -8,11 +10,10 @@ use crate::{
         EPSILON, BLOCK_SIZE, Point2D, BSP_DEPTH_LIMIT
     },
     document::Document,
+    bsp::bsp_util::Line2D,
+    map::{LineDef, Vertex, Sector},
 };
 
-use crate::bsp::bsp_util::Line2D;
-
-use crate::map::{LineDef, Vertex, Sector};
 #[derive(Debug, Clone)]
 pub struct Seg {
     pub start: Point2D,
@@ -135,13 +136,7 @@ impl BspLevel {
     // Step 1: create initial segs from linedefs
     // ----------------------------------------------------------------
     fn create_initial_segs(&self) -> Result<Vec<Arc<Seg>>, String> {
-        // NOTE: You said your Document has some .vertices() and .linedefs() accessors;
-        // adjust to your actual code. This is just a placeholder pattern:
-
         let doc_guard = self.doc.read();
-
-        // Assuming doc_guard.linedefs is an Arc<RwLock<Vec<Arc<LineDef>>>>,
-        // acquire a read lock to access the Vec.
         let linedefs_ref = doc_guard.linedefs.read();
         let vertices_ref = doc_guard.vertices.read();
 
@@ -158,8 +153,8 @@ impl BspLevel {
             // front seg
             if linedef.right >= 0 {
                 let seg_arc = Arc::new(Seg {
-                    start: Point2D::new(start_v.raw_x as f64, start_v.raw_y as f64),
-                    end: Point2D::new(end_v.raw_x as f64, end_v.raw_y as f64),
+                    start: Point2D::new(start_v.x as f64, start_v.y as f64),
+                    end: Point2D::new(end_v.x as f64, end_v.y as f64),
                     angle: Self::compute_angle(start_v, end_v),
                     length: Self::compute_length(start_v, end_v),
                     linedef: Some(linedef.clone()), // if linedef is Arc<LineDef>, else wrap
@@ -172,8 +167,8 @@ impl BspLevel {
             // back seg
             if linedef.left >= 0 {
                 let seg_arc = Arc::new(Seg {
-                    start: Point2D::new(end_v.raw_x as f64, end_v.raw_y as f64),
-                    end: Point2D::new(start_v.raw_x as f64, start_v.raw_y as f64),
+                    start: Point2D::new(end_v.x as f64, end_v.y as f64),
+                    end: Point2D::new(start_v.x as f64, start_v.y as f64),
                     angle: Self::compute_angle(end_v, start_v),
                     length: Self::compute_length(end_v, start_v),
                     linedef: Some(linedef.clone()),
@@ -201,13 +196,11 @@ impl BspLevel {
                         let seg_i = segs[i].clone();
                         let seg_j = segs[j].clone();
 
-                        // 2) Mutate each seg’s `partner` field in-place. Because these are plain Arc<Seg>,
-                        //    we either re-construct a new seg or mutate with a "get_mut if unique".
-                        //    If you expect multiple references, consider a different approach (like interior mutability).
-                        if let Some(i_mut) = Arc::get_mut(&mut (segs[i].clone())) {
+                        // 2) Attempt to mutate each seg’s `partner` if we have a unique Arc.
+                        if let Some(i_mut) = Arc::get_mut(&mut (seg_i.clone())) {
                             i_mut.partner = Some(seg_j.clone());
                         }
-                        if let Some(j_mut) = Arc::get_mut(&mut (segs[j].clone())) {
+                        if let Some(j_mut) = Arc::get_mut(&mut (seg_j.clone())) {
                             j_mut.partner = Some(seg_i.clone());
                         }
                     }
@@ -338,16 +331,13 @@ impl BspLevel {
         let mut segs_guard = self.segs.write();
 
         // EXAMPLE: sort by the start.x coordinate, then start.y
-        // or if you want to sort by linedef "id", you must have `linedef.id`.
         segs_guard.sort_by(|a, b| {
             let a_read = a.as_ref();
             let b_read = b.as_ref();
-            // For example, sort by start.x then start.y
             let ord_x = a_read.start.x.partial_cmp(&b_read.start.x).unwrap_or(std::cmp::Ordering::Equal);
             if ord_x != std::cmp::Ordering::Equal {
                 ord_x
             } else {
-                // fallback to comparing y
                 a_read.start.y.partial_cmp(&b_read.start.y).unwrap_or(std::cmp::Ordering::Equal)
             }
         });
@@ -373,25 +363,24 @@ impl BspLevel {
     // Some utility fns
     // ----------------------------------------------------------------
     fn compute_angle(a: &Vertex, b: &Vertex) -> f64 {
-        let dx = (b.raw_x - a.raw_x) as f64;
-        let dy = (b.raw_y - a.raw_y) as f64;
-        dy.atan2(dx)
+        let dx = (b.x - a.x) as f64;
+        let dy = (b.y - a.y) as f64;
+        dy.atan2(dx)  // or dx.atan2(dy), depending on orientation preference
     }
 
     fn compute_length(a: &Vertex, b: &Vertex) -> f64 {
-        let dx = (b.raw_x - a.raw_x) as f64;
-        let dy = (b.raw_y - a.raw_y) as f64;
+        let dx = (b.x - a.x) as f64;
+        let dy = (b.y - a.y) as f64;
         dx.hypot(dy)
     }
 
     fn compute_map_bounds(doc_ref: &Arc<RwLock<Document>>) -> BoundingBox {
         let doc = doc_ref.read();
-        // If doc has `vertices` as an Arc<RwLock<Vec<Arc<Vertex>>>>, first acquire a read lock.
         let mut bb = BoundingBox::new_empty();
         let vertices_ref = doc.vertices.read();
         for v in vertices_ref.iter() {
-            bb.expand_point(v.raw_x as f64, v.raw_y as f64);
+            bb.expand_point(v.x as f64, v.y as f64);
         }
         bb
     }
-} 
+}
