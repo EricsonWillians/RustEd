@@ -1,42 +1,55 @@
-// src/ui/central_panel.rs
+//! Central panel UI module: handles zoom, pan, drawing geometry, hover detection, and
+//! input forwarding to the current tool.
 
 use std::sync::Arc;
-
-use eframe::egui::{
-    self, Align2, Color32, Context, FontId, Painter, Pos2, Rect, Sense, Stroke, Ui, Vec2, Window,
-};
 use parking_lot::RwLock;
+use eframe::egui::{
+    self, Align2, Color32, Context, FontId, Painter, Pos2, Rect, Sense, Stroke, Vec2, Window,
+};
 
 use crate::bsp::debug_viz::BspDebugger;
 use crate::document::Document;
-use crate::editor::core::{Editor, Selection, Tool}; 
+use crate::editor::core::Editor;
 use crate::map::{LineDef, Vertex, Thing};
+use crate::editor::tools::Tool;
 
-/// CentralPanel is the main view in your UI, handling:
-///   - Zoom & pan
-///   - Drawing geometry (linedefs, vertices, things)
-///   - Hover highlighting
-///   - Forwarding clicks to Editor for selection, etc.
+/// A simple enum for hover detection. This type stores the currently hovered geometry.
+#[derive(Clone)]
+pub enum Selection {
+    None,
+    Vertex(Vertex),
+    Line(LineDef),
+    Thing(Thing),
+}
+
+impl Default for Selection {
+    fn default() -> Self {
+        Selection::None
+    }
+}
+
+/// The `CentralPanel` struct provides the main viewport for the editor.
+/// It is responsible for handling pan/zoom, drawing the map and grid,
+/// hover detection, and forwarding pointer input to the active tool.
 pub struct CentralPanel {
     editor: Arc<RwLock<Editor>>,
 
-    /// Current zoom factor (scales world->screen).
-    pub zoom: f32,
+    /// Current zoom factor (scales world→screen).
+    zoom: f32,
 
-    /// Current pan offset (screen coords).
-    pub pan: Vec2,
+    /// Current pan offset (in screen coordinates).
+    pan: Vec2,
 
-    /// If true, shows a BSP debugging overlay/window.
+    /// Whether to show the BSP debugging overlay.
     pub show_bsp_debug: bool,
     bsp_debugger: BspDebugger,
 
-    /// The geometry we are currently hovering (if any). We'll store a copy
-    /// matching your Selection variants, because your Selection expects e.g.
-    /// `Line(LineDef)` not `Arc<LineDef>`.
+    /// The geometry that is currently hovered (if any).
     hovered_selection: Selection,
 }
 
 impl CentralPanel {
+    /// Create a new central panel instance.
     pub fn new(editor: Arc<RwLock<Editor>>) -> Self {
         Self {
             editor,
@@ -44,92 +57,101 @@ impl CentralPanel {
             pan: Vec2::new(0.0, 0.0),
             show_bsp_debug: false,
             bsp_debugger: BspDebugger::new(),
-            hovered_selection: Selection::None,
+            hovered_selection: Selection::default(),
         }
     }
 
-    /// Called each frame to update the central region.
+    /// Returns the current zoom factor.
+    pub fn get_zoom(&self) -> f32 {
+        self.zoom
+    }
+
+    /// Returns the current pan offset.
+    pub fn get_pan(&self) -> Vec2 {
+        self.pan
+    }
+
+    /// Sets the zoom factor.
+    pub fn set_zoom(&mut self, z: f32) {
+        self.zoom = z;
+    }
+
+    /// Sets the pan offset.
+    pub fn set_pan(&mut self, p: Vec2) {
+        self.pan = p;
+    }
+
+    /// Called each frame to update the central panel.
     pub fn update(&mut self, ctx: &Context) {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(Color32::BLACK))
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
 
-                // --- Conditional Drag Handling ---
-                let response = if self.editor.read().current_tool() == Tool::Select {
-                    // Only interact for dragging (panning) if the Select tool is active.
-                    ui.interact(rect, ui.id(), Sense::drag())
-                } else {
-                    // If a different tool is active, don't interact for dragging.
-                    // We still need a response, so create a dummy one.
-                    ui.interact(rect, ui.id(), Sense::hover()) // Use Sense::hover()
-
-                };
-
-                // Mouse wheel zoom
-                self.handle_zoom(ui, &response);
-
-                // Mouse drag pan (now conditional, only active with Select tool)
-                if self.editor.read().current_tool() == Tool::Select { //pan only in select mode
+                // --- Input & Pan/Zoom Handling ---
+                if self.editor.read().current_tool_name() == "Select" {
+                    // Allow dragging for panning in Select mode.
+                    let response = ui.interact(rect, ui.id(), Sense::drag());
+                    self.handle_zoom(ui, &response);
                     self.handle_pan(&response);
+                } else {
+                    // Otherwise, only track hover.
+                    let response = ui.interact(rect, ui.id(), Sense::hover());
+                    self.handle_zoom(ui, &response);
                 }
 
-                // Fill background
+                // --- Drawing: Background, Grid, Map ---
                 let painter = ui.painter_at(rect);
                 painter.rect_filled(rect, 0.0, Color32::BLACK);
-
-                // Draw grid
                 self.draw_grid(&painter, rect);
 
-                // Draw geometry if there's a document
                 if let Some(doc_arc) = self.editor.read().document() {
                     self.draw_map(&painter, &doc_arc, rect, ui);
                 }
 
-                // Hover detection AND input handling.  Do this *AFTER* drawing.
+                // --- Hover Detection & Input Forwarding ---
                 if rect.contains(ui.input().pointer.hover_pos().unwrap_or_default()) {
-                   if let Some(mouse_pos) = ui.input().pointer.hover_pos() {
-                       self.update_hover(mouse_pos);
-
-                        // Pass input to Editor
+                    if let Some(mouse_pos) = ui.input().pointer.hover_pos() {
+                        self.update_hover(mouse_pos);
                         let world_pos = self.screen_to_world(mouse_pos);
-                        let mut editor = self.editor.write();
-                        editor.handle_input(
+                        self.editor.write().handle_input(
                             world_pos,
                             ui.input().pointer.primary_clicked(),
                             ui.input().pointer.secondary_clicked(),
                             ui.input().pointer.button_clicked(egui::PointerButton::Middle),
                             ui.input().pointer.button_down(egui::PointerButton::Primary),
                             ui.input().pointer.delta(),
-                            ui.input().modifiers, // Include modifier keys (Shift, Ctrl, Alt)
+                            ui.input().modifiers,
                         );
-
                     } else {
-                      self.hovered_selection = Selection::None;
+                        self.hovered_selection = Selection::None;
                     }
                 } else {
                     self.hovered_selection = Selection::None;
                 }
 
-                // Check dirty flag and request repaint
+                // --- Document Dirty Flag Handling ---
                 if let Some(doc_arc) = self.editor.read().document() {
                     let doc = doc_arc.read();
                     if doc.dirty {
                         ctx.request_repaint();
-                        // Reset the dirty flag *AFTER* drawing and potentially other UI updates
-                        drop(doc);  // Explicitly drop read lock before acquiring write lock
-                        doc_arc.write().dirty = false; // Only modify through write lock
+                        drop(doc);
+                        doc_arc.write().dirty = false;
                     }
                 }
+
+                // --- BSP Debug Window ---
                 if self.show_bsp_debug {
                     self.show_bsp_debug_window(ctx);
                 }
             });
     }
 
-    //--- Zoom and Pan Handling ---
+    // ============================================================
+    // Zoom and Pan Handling
+    // ============================================================
 
-    fn handle_zoom(&mut self, ui: &Ui, response: &egui::Response) {
+    fn handle_zoom(&mut self, ui: &egui::Ui, response: &egui::Response) {
         if response.hovered() && ui.input().scroll_delta.y.abs() > 0.0 {
             let old_zoom = self.zoom;
             let zoom_sensitivity = 0.001;
@@ -137,7 +159,7 @@ impl CentralPanel {
             let new_zoom = (old_zoom * factor).clamp(0.05, 20.0);
 
             if let Some(pointer) = ui.input().pointer.hover_pos() {
-                // keep mouse pointer stable in world coords
+                // Keep the mouse pointer stable in world coordinates.
                 let world_before = self.screen_to_world(pointer);
                 self.zoom = new_zoom;
                 self.pan = pointer.to_vec2() - world_before.to_vec2() * self.zoom;
@@ -155,55 +177,51 @@ impl CentralPanel {
         }
     }
 
-    //--- Conversions between world and screen coords ---
+    // ============================================================
+    // Coordinate Conversion
+    // ============================================================
+
+    /// Converts world coordinates to screen coordinates.
     fn world_to_screen(&self, world: Pos2) -> Pos2 {
         Pos2::new(world.x * self.zoom + self.pan.x, world.y * self.zoom + self.pan.y)
     }
 
+    /// Converts screen coordinates to world coordinates.
     fn screen_to_world(&self, screen: Pos2) -> Pos2 {
         Pos2::new((screen.x - self.pan.x) / self.zoom, (screen.y - self.pan.y) / self.zoom)
     }
 
-    //--- Main draw logic: lines, vertices, things, highlight, etc. ---
+    // ============================================================
+    // Drawing Functions
+    // ============================================================
 
-    fn draw_map(&self, painter: &Painter, doc_arc: &Arc<RwLock<Document>>, _rect: Rect, ui: &Ui) {
+    /// Draws the map (linedefs, vertices, things) from the document.
+    fn draw_map(&self, painter: &Painter, doc_arc: &Arc<RwLock<Document>>, _rect: Rect, _ui: &egui::Ui) {
         let doc = doc_arc.read();
-
         let verts = doc.vertices.read();
         let lines = doc.linedefs.read();
         let things = doc.things.read();
 
-        // 1) Draw linedefs + vertices
+        // Draw linedefs and vertices.
         for ld_arc in lines.iter() {
-            // each linedef in doc is `Arc<LineDef>`
-            let ld: &LineDef = ld_arc.as_ref(); // get the underlying struct
-
-            // check indices in vertices
+            let ld: &LineDef = ld_arc.as_ref();
             if ld.start < verts.len() && ld.end < verts.len() {
-                let sv = &*verts[ld.start]; // &Arc<Vertex> -> &Vertex
+                let sv = &*verts[ld.start];
                 let ev = &*verts[ld.end];
 
                 let p1 = self.world_to_screen(Pos2::new(sv.x as f32, sv.y as f32));
                 let p2 = self.world_to_screen(Pos2::new(ev.x as f32, ev.y as f32));
 
-                // Are we hovered over this line? Compare to hovered_selection
-                let is_line_hovered = match &self.hovered_selection {
-                    Selection::Line(hover_ld) => (hover_ld.start == ld.start && hover_ld.end == ld.end),
-                    _ => false,
-                };
+                let is_line_hovered = matches!(self.hovered_selection, Selection::Line(ref hover_ld)
+                    if hover_ld.start == ld.start && hover_ld.end == ld.end);
 
                 let line_color = if is_line_hovered { Color32::YELLOW } else { Color32::GREEN };
                 painter.line_segment([p1, p2], Stroke::new(2.0, line_color));
 
-                // Are these vertices hovered?
-                let start_hover = match &self.hovered_selection {
-                    Selection::Vertex(v) => (v.x == sv.x && v.y == sv.y),
-                    _ => false,
-                };
-                let end_hover = match &self.hovered_selection {
-                    Selection::Vertex(v) => (v.x == ev.x && v.y == ev.y),
-                    _ => false,
-                };
+                let start_hover = matches!(self.hovered_selection, Selection::Vertex(ref v)
+                    if v.x == sv.x && v.y == sv.y);
+                let end_hover = matches!(self.hovered_selection, Selection::Vertex(ref v)
+                    if v.x == ev.x && v.y == ev.y);
                 let start_rad = if start_hover { 5.0 } else { 3.0 };
                 let end_rad = if end_hover { 5.0 } else { 3.0 };
 
@@ -212,23 +230,20 @@ impl CentralPanel {
             }
         }
 
-        // 2) Draw things
+        // Draw things.
         for thing_arc in things.iter() {
             let th: &Thing = thing_arc.as_ref();
             let screen_pos = self.world_to_screen(Pos2::new(th.x as f32, th.y as f32));
 
-            // check if hovered
-            let hovered_thing = match &self.hovered_selection {
-                Selection::Thing(t) => (t.x == th.x && t.y == th.y),
-                _ => false,
-            };
+            let hovered_thing = matches!(self.hovered_selection, Selection::Thing(ref t)
+                if t.x == th.x && t.y == th.y);
 
             let radius = if hovered_thing { 6.0 } else { 4.0 };
             let color = if hovered_thing { Color32::LIGHT_BLUE } else { Color32::WHITE };
 
             painter.circle_filled(screen_pos, radius, color);
 
-            // small label: doom_type
+            // Draw a label for the thing's type.
             let label_offset = Vec2::new(8.0, -4.0);
             painter.text(
                 screen_pos + label_offset,
@@ -240,7 +255,7 @@ impl CentralPanel {
         }
     }
 
-    //--- Grid drawing ---
+    /// Draws a grid in world space.
     fn draw_grid(&self, painter: &Painter, rect: Rect) {
         let grid_spacing_world = 64.0;
         let stroke = Stroke::new(1.0, Color32::from_gray(60));
@@ -267,13 +282,14 @@ impl CentralPanel {
         }
     }
 
-    //--- Hover detection & selection ---
+    // ============================================================
+    // Hover Detection
+    // ============================================================
 
-    /// Perform a naive hover check. We store the final in `hovered_selection`.
+    /// Updates `hovered_selection` by performing a simple distance check on vertices,
+    /// lines, and things.
     fn update_hover(&mut self, screen_pos: Pos2) {
-        // convert mouse to world coords
         let world_pos = self.screen_to_world(screen_pos);
-
         self.hovered_selection = Selection::None;
 
         if let Some(doc_arc) = self.editor.read().document() {
@@ -282,24 +298,22 @@ impl CentralPanel {
             let lines = doc.linedefs.read();
             let things = doc.things.read();
 
-            // threshold for distance checks
-            let vertex_thresh_sq = 10.0_f32.powi(2); // 10 units
-            let thing_thresh_sq = 12.0_f32.powi(2);  // 12 units
+            let vertex_thresh_sq = 10.0_f32.powi(2);
+            let thing_thresh_sq = 12.0_f32.powi(2);
             let line_thresh = 5.0_f32;
 
-            // 1) Check vertices
+            // Check vertices.
             for v_arc in verts.iter() {
                 let v: &Vertex = v_arc.as_ref();
                 let dx = v.x as f32 - world_pos.x;
                 let dy = v.y as f32 - world_pos.y;
-                if dx*dx + dy*dy < vertex_thresh_sq {
-                    // store a clone of the raw Vertex
+                if dx * dx + dy * dy < vertex_thresh_sq {
                     self.hovered_selection = Selection::Vertex(v.clone());
                     return;
                 }
             }
 
-            // 2) Check linedefs
+            // Check linedefs.
             for ld_arc in lines.iter() {
                 let ld: &LineDef = ld_arc.as_ref();
                 if ld.start >= verts.len() || ld.end >= verts.len() {
@@ -318,12 +332,12 @@ impl CentralPanel {
                 }
             }
 
-            // 3) Check things
+            // Check things.
             for thing_arc in things.iter() {
                 let th: &Thing = thing_arc.as_ref();
                 let dx = th.x as f32 - world_pos.x;
                 let dy = th.y as f32 - world_pos.y;
-                if dx*dx + dy*dy < thing_thresh_sq {
+                if dx * dx + dy * dy < thing_thresh_sq {
                     self.hovered_selection = Selection::Thing(th.clone());
                     return;
                 }
@@ -331,8 +345,11 @@ impl CentralPanel {
         }
     }
 
-    //--- Debugging the BSP, if you have that system in place ---
+    // ============================================================
+    // BSP Debug Window
+    // ============================================================
 
+    /// Displays the BSP debug window if BSP data is available.
     fn show_bsp_debug_window(&mut self, ctx: &Context) {
         Window::new("BSP Debug")
             .resizable(true)
@@ -353,34 +370,12 @@ impl CentralPanel {
                     ui.label(format!("Blockmap: {}x{}", blocks_guard.width, blocks_guard.height));
                 } else {
                     ui.label("No BSP data available.");
-                    if ui.button("Generate Test Map").clicked() {
-                        drop(ed);
-                        self.editor.write().generate_test_map();
-                    }
                 }
             });
     }
-
-    //--- Utility: Expose zoom/pan for external usage ---
-
-    pub fn get_zoom(&self) -> f32 {
-        self.zoom
-    }
-
-    pub fn get_pan(&self) -> Vec2 {
-        self.pan
-    }
-
-    pub fn set_zoom(&mut self, z: f32) {
-        self.zoom = z;
-    }
-
-    pub fn set_pan(&mut self, p: Vec2) {
-        self.pan = p;
-    }
 }
 
-/// Return distance^2 from point P to line segment [A,B].
+/// Returns the squared distance from point P to the line segment [A, B].
 fn distance_sq_to_segment(
     (ax, ay): (f32, f32),
     (bx, by): (f32, f32),
@@ -391,22 +386,20 @@ fn distance_sq_to_segment(
     let wx = px - ax;
     let wy = py - ay;
 
-    let c1 = wx*vx + wy*vy;
+    let c1 = wx * vx + wy * vy;
     if c1 <= 0.0 {
-        // closest to A
-        return wx*wx + wy*wy;
+        return wx * wx + wy * wy;
     }
-    let c2 = vx*vx + vy*vy;
+    let c2 = vx * vx + vy * vy;
     if c2 <= c1 {
-        // closest to B
         let dx = px - bx;
         let dy = py - by;
-        return dx*dx + dy*dy;
+        return dx * dx + dy * dy;
     }
     let b = c1 / c2;
-    let projx = ax + b*vx;
-    let projy = ay + b*vy;
+    let projx = ax + b * vx;
+    let projy = ay + b * vy;
     let dx = px - projx;
     let dy = py - projy;
-    dx*dx + dy*dy
+    dx * dx + dy * dy
 }

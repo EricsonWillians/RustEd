@@ -69,7 +69,7 @@ impl MenuBar {
                         ui.close_menu();
                     }
                     if ui.button("Generate Test Map").clicked() {
-                        self.editor.write().generate_test_map();
+                        // self.editor.write().generate_test_map();
                         ui.close_menu();
                     }
                 });

@@ -134,6 +134,15 @@ impl BoundingBox {
         self.max_x >= other.min_x && self.min_x <= other.max_x &&
         self.max_y >= other.min_y && self.min_y <= other.max_y
     }
+
+    pub fn from_points(points: &[Point2D]) -> Self {
+        let mut bbox = BoundingBox::new_empty();
+        for point in points {
+            bbox.expand_point(point.x, point.y);
+        }
+        bbox
+    }
+    
 }
 
 

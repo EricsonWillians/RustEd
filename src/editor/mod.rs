@@ -6,6 +6,7 @@ pub mod generator;
 pub mod hover;
 pub mod instance;
 pub mod core;
+pub mod tools;
 
 use thiserror::Error;
 
