@@ -229,103 +229,131 @@ impl MainWindow {
                 }
                 ui.separator();
                 ui.heading("Levels");
-    
-                // Retrieve available levels inside its own scope.
-                let levels: Vec<String> = {
-                    if let Some(doc_arc) = self.editor.read().document() {
+                // Level selection UI.
+                if let Some(doc_arc) = self.editor.read().document() {
+                    let levels = {
                         let doc = doc_arc.read();
-                        let levels = doc.available_levels();
-                        info!("Detected levels: {:?}", levels);
-                        levels
+                        let lvl_list = doc.available_levels();
+                        info!("Detected levels: {:?}", lvl_list);
+                        lvl_list
+                    };
+                    if levels.is_empty() {
+                        ui.label("No levels found. Check your WAD file.");
                     } else {
-                        Vec::new()
-                    }
-                };
-    
-                if levels.is_empty() {
-                    ui.label("No levels found. Check your WAD file.");
-                } else {
-                    for level in &levels {
-                        ui.horizontal(|ui| {
-                            if ui.button(level).clicked() {
-                                info!("Reloading level: {}", level);
-                                if let Some(doc_arc) = self.editor.read().document() {
-                                    // Create a new cursor over the stored WAD data.
-                                    let wad_data_opt = { self.editor.read().document().unwrap().read().wad_data.read().clone() };
-                                    if let Some(wad_data) = wad_data_opt {
-                                        let mut cursor = std::io::Cursor::new(wad_data);
-                                        // Acquire a write lock to load the level.
-                                        match doc_arc.write().load_level(level, &mut cursor) {
-                                            Ok(_) => {
-                                                self.status_message = format!("Loaded level: {}", level);
-                                                info!("Successfully loaded level: {}", level);
+                        for level in &levels {
+                            ui.horizontal(|ui| {
+                                if ui.button(level).clicked() {
+                                    info!("Reloading level: {}", level);
+                                    // Drop any locks before reloading.
+                                    if let Some(doc_arc) = self.editor.read().document() {
+                                        // Use the stored wad_data to create a new cursor.
+                                        let wad_data_opt = {
+                                            let doc = doc_arc.read();
+                                            let wad_data = doc.wad_data.read().clone();
+                                            drop(doc);
+                                            wad_data
+                                        };
+                                        if let Some(wad_data) = wad_data_opt {
+                                            let mut cursor = std::io::Cursor::new(wad_data);
+                                            match doc_arc.write().load_level(level, &mut cursor) {
+                                                Ok(_) => {
+                                                    self.status_message = format!("Loaded level: {}", level);
+                                                    info!("Successfully loaded level: {}", level);
+                                                    // Recenter view:
+                                                    if let Some(bbox) = doc_arc.read().bounding_box() {
+                                                        let center = bbox.center();
+                                                        // Reset zoom (to 1.0 for now) and set pan so that the level center is at (0,0)
+                                                        self.zoom = 1.0;
+                                                        self.pan = egui::vec2(-center.x * self.zoom, -center.y * self.zoom);
+                                                    }
+                                                },
+                                                Err(e) => {
+                                                    self.error_message = Some(format!("Failed to load level {}: {}", level, e));
+                                                    error!("Failed to load level {}: {}", level, e);
+                                                }
                                             }
-                                            Err(e) => {
-                                                self.error_message = Some(format!("Failed to load level {}: {}", level, e));
-                                                error!("Failed to load level {}: {}", level, e);
-                                            }
+                                        } else {
+                                            self.error_message = Some("No WAD data stored".to_string());
+                                            error!("No WAD data stored");
                                         }
                                     } else {
-                                        self.error_message = Some("No WAD data stored".to_string());
-                                        error!("No WAD data stored");
+                                        self.error_message = Some("No document loaded".to_string());
+                                        error!("No document loaded");
                                     }
-                                } else {
-                                    self.error_message = Some("No document loaded".to_string());
-                                    error!("No document loaded");
                                 }
-                            }
-                        });
+                            });
+                        }
                     }
+                } else {
+                    ui.label("No document loaded");
                 }
                 ui.separator();
                 ui.heading("Properties");
                 let selection = self.editor.read().selected_object();
                 self.show_property_editor(ui, &selection);
             });
-    }    
+    }
 
     // ------------------------------------------------------------------------
-    // Central Area (Map Canvas with Pan/Zoom)
+    // Central Drawing Area with Pan & Zoom
     // ------------------------------------------------------------------------
     fn update_central_area(&mut self, ctx: &Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Allocate the painter.
-            let available_size = ui.available_size();
-            let (response, painter) =
-                ui.allocate_painter(available_size, Sense::click_and_drag());
+        // Use a CentralPanel so that drawing is confined to the proper area.
+        egui::CentralPanel::default().frame(egui::Frame::none().fill(egui::Color32::BLACK)).show(ctx, |ui| {
+            let rect = ui.available_rect_before_wrap();
 
-            // --- Pan: if right mouse button is pressed, update pan offset ---
-            if ctx.input().pointer.button_down(egui::PointerButton::Secondary) {
-                let delta = ctx.input().pointer.delta();
-                self.pan += delta;
+            // Create an interactive response covering the entire canvas.
+            let response = ui.interact(rect, ui.id(), Sense::drag());
+
+            // --- Zooming ---
+            if response.hovered() {
+                if ui.input().scroll_delta.y.abs() > 0.0 {
+                    // Compute new zoom factor.
+                    let old_zoom = self.zoom;
+                    let zoom_sensitivity = 0.001;
+                    let factor = 1.0 + ui.input().scroll_delta.y * zoom_sensitivity;
+                    let new_zoom = (old_zoom * factor).clamp(0.1, 10.0);
+
+                    // Adjust pan so that the zoom is centered on the pointer.
+                    if let Some(pointer) = ui.input().pointer.hover_pos() {
+                        // World coordinate under the pointer before zoom.
+                        let world_before = self.screen_to_world(pointer);
+                        // Update zoom.
+                        self.zoom = new_zoom;
+                        // New pan so that world_before maps to the same screen position:
+                        self.pan = pointer.to_vec2() - world_before.to_vec2() * self.zoom;
+                    } else {
+                        self.zoom = new_zoom;
+                    }
+                    ui.ctx().request_repaint();
+                }
             }
 
-            // --- Zoom: update zoom factor based on scroll wheel ---
-            let scroll = ctx.input().scroll_delta;
-            if scroll != egui::Vec2::ZERO {
-                // Get the current cursor position (default to center if not available)
-                let cursor = ctx.input().pointer.hover_pos().unwrap_or(egui::Pos2::new(
-                    available_size.x / 2.0,
-                    available_size.y / 2.0,
-                ));
-                let old_zoom = self.zoom;
-                let scale_factor = (1.0 + scroll.y * 0.001).clamp(0.9, 1.1);
-                self.zoom = (self.zoom * scale_factor).clamp(0.1, 10.0);
-                // Adjust pan so that the world coordinate under the cursor remains fixed.
-                let world_before = self.screen_to_world(cursor);
-                self.pan = cursor.to_vec2() - world_before.to_vec2() * self.zoom;
+            // --- Panning via drag ---
+            if response.dragged() {
+                self.pan += response.drag_delta();
+                ui.ctx().request_repaint();
             }
 
-            // Draw background grid.
-            self.draw_editor_grid(&painter, response.rect);
-            // Draw the map geometry.
-            let editor = self.editor.read();
-            if let Some(doc_arc) = editor.document() {
-                self.draw_map_geometry(&painter, Arc::clone(&doc_arc), response.rect);
+            // Get a painter for the drawing area.
+            let painter = ui.painter_at(rect);
+
+            // Draw background.
+            painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
+
+            // Draw grid.
+            self.draw_editor_grid(&painter, rect);
+
+            // Draw map geometry.
+            if let Some(doc_arc) = self.editor.read().document() {
+                self.draw_map_geometry(&painter, doc_arc.clone(), rect);
+                self.draw_vertices(&painter, doc_arc.clone(), rect);
+                // (Optional) Extend here to draw sectors, things, etc.
             }
-            // Handle clicks.
+
+            // Handle mouse clicks on the canvas.
             if response.clicked() {
-                if let Some(pos) = response.interact_pointer_pos() {
+                if let Some(pos) = ui.input().pointer.interact_pos() {
                     self.handle_editor_click(pos);
                 }
             }
@@ -513,20 +541,41 @@ impl MainWindow {
         }
     }
 
-    /// Draws a background grid on the editor canvas.
-    fn draw_editor_grid(&self, painter: &egui::Painter, rect: egui::Rect) {
-        let grid_spacing = 50.0 * self.zoom;
-        let color = egui::Color32::from_gray(40);
-        let stroke = egui::Stroke::new(0.5, color);
-        let mut x = rect.left() % grid_spacing;
-        while x < rect.right() {
-            painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], stroke);
-            x += grid_spacing;
+    /// Draws vertices as small circles for better visual feedback.
+    fn draw_vertices(&self, painter: &egui::Painter, doc: Arc<RwLock<Document>>, _rect: egui::Rect) {
+        let doc_read = doc.read();
+        let vertices = doc_read.vertices.read();
+        for vertex in vertices.iter() {
+            let pos = self.world_to_screen(egui::pos2(vertex.raw_x as f32, vertex.raw_y as f32));
+            painter.circle_filled(pos, 3.0, egui::Color32::RED);
         }
-        let mut y = rect.top() % grid_spacing;
-        while y < rect.bottom() {
-            painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], stroke);
-            y += grid_spacing;
+    }
+
+    /// Draws a background grid on the editor canvas in world coordinates.
+    fn draw_editor_grid(&self, painter: &egui::Painter, rect: egui::Rect) {
+        let grid_spacing_world = 50.0; // Constant spacing in world units.
+        // Convert screen rect to world coordinates.
+        let world_min = self.screen_to_world(rect.min);
+        let world_max = self.screen_to_world(rect.max);
+        // Compute starting positions.
+        let start_x = (world_min.x / grid_spacing_world).floor() * grid_spacing_world;
+        let start_y = (world_min.y / grid_spacing_world).floor() * grid_spacing_world;
+        let stroke = egui::Stroke::new(0.5, egui::Color32::from_gray(40));
+
+        let mut x = start_x;
+        while x <= world_max.x {
+            let p1 = self.world_to_screen(egui::pos2(x, world_min.y));
+            let p2 = self.world_to_screen(egui::pos2(x, world_max.y));
+            painter.line_segment([p1, p2], stroke);
+            x += grid_spacing_world;
+        }
+
+        let mut y = start_y;
+        while y <= world_max.y {
+            let p1 = self.world_to_screen(egui::pos2(world_min.x, y));
+            let p2 = self.world_to_screen(egui::pos2(world_max.x, y));
+            painter.line_segment([p1, p2], stroke);
+            y += grid_spacing_world;
         }
     }
 

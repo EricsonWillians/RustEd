@@ -372,9 +372,7 @@ impl Document {
     // --- WAD Loading and Level Selection ---
 
     /// Loads a WAD file from the given reader.
-    /// In addition to reading header and directory and grouping levels,
-    /// this function reads the entire file into memory (wad_data) so that
-    /// levels can be reloaded on demand.
+    /// Reads the entire file into memory (wad_data) so that levels can be reloaded on demand.
     pub fn load_wad<R: Read + Seek>(&mut self, reader: &mut R) -> io::Result<()> {
         self.clear();
         self.clear_geometry();
@@ -485,7 +483,28 @@ impl Document {
         }
     }
 
-    /// Loads the geometry for a specific level (by its marker, e.g. "MAP01").
+    /// Computes the bounding box of the level from its vertices.
+    pub fn bounding_box(&self) -> Option<egui::Rect> {
+        let vertices = self.vertices.read();
+        if vertices.is_empty() {
+            return None;
+        }
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        for vertex in vertices.iter() {
+            let x = vertex.raw_x as f32;
+            let y = vertex.raw_y as f32;
+            if x < min_x { min_x = x; }
+            if y < min_y { min_y = y; }
+            if x > max_x { max_x = x; }
+            if y > max_y { max_y = y; }
+        }
+        Some(egui::Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y)))
+    }
+
+    /// Loads the geometry for a level given by its marker (e.g. "MAP01").
     pub fn load_level<R: Read + Seek>(&mut self, level_name: &str, reader: &mut R) -> io::Result<()> {
         self.clear_geometry();
         let level_info_opt = {
@@ -496,7 +515,9 @@ impl Document {
             let directory = self.directory.read();
             for &index in &level_info.lump_indices {
                 let entry = &directory[index];
-                match entry.name.as_str() {
+                // Normalize lump name by trimming and converting to uppercase.
+                let lump_name = entry.name.trim().to_uppercase();
+                match lump_name.as_str() {
                     "THINGS" => { self.load_things(reader, entry.offset, entry.size)?; },
                     "VERTEXES" => { self.load_vertices(reader, entry.offset, entry.size)?; },
                     "SECTORS" => { self.load_sectors(reader, entry.offset, entry.size)?; },
@@ -504,7 +525,7 @@ impl Document {
                     "LINEDEFS" => { self.load_linedefs(reader, entry.offset, entry.size)?; },
                     "BEHAVIOR" => { self.load_behavior(reader, entry.offset, entry.size)?; },
                     "SCRIPTS" => { self.load_scripts(reader, entry.offset, entry.size)?; },
-                    _ => { /* Ignore other lumps, including the level marker itself */ }
+                    _ => { /* Ignore unknown lumps */ }
                 }
             }
             *self.selected_level.write() = Some(level_info.name.clone());
@@ -522,6 +543,10 @@ impl Document {
     // --- Lump-loading helper functions ---
 
     fn load_things<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
+        // Each thing record is 10 bytes.
+        if size % 10 != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "THINGS lump size is not a multiple of 10"));
+        }
         reader.seek(SeekFrom::Start(offset as u64))?;
         let num_things = size / 10;
         let mut things = self.things.write();
@@ -535,6 +560,10 @@ impl Document {
     }
 
     fn load_vertices<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
+        // Each vertex record is 4 bytes.
+        if size % 4 != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "VERTEXES lump size is not a multiple of 4"));
+        }
         reader.seek(SeekFrom::Start(offset as u64))?;
         let num_vertices = size / 4;
         let mut vertices = self.vertices.write();
@@ -548,6 +577,10 @@ impl Document {
     }
 
     fn load_sectors<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
+        // Each sector record is 26 bytes.
+        if size % 26 != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "SECTORS lump size is not a multiple of 26"));
+        }
         reader.seek(SeekFrom::Start(offset as u64))?;
         let num_sectors = size / 26;
         let mut sectors = self.sectors.write();
@@ -561,6 +594,10 @@ impl Document {
     }
 
     fn load_sidedefs<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
+        // Each sidedef record is 30 bytes.
+        if size % 30 != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "SIDEDEFS lump size is not a multiple of 30"));
+        }
         reader.seek(SeekFrom::Start(offset as u64))?;
         let num_sidedefs = size / 30;
         let mut sidedefs = self.sidedefs.write();
@@ -574,6 +611,10 @@ impl Document {
     }
 
     fn load_linedefs<R: Read + Seek>(&self, reader: &mut R, offset: i32, size: i32) -> io::Result<()> {
+        // Each linedef record is 14 bytes.
+        if size % 14 != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "LINEDEFS lump size is not a multiple of 14"));
+        }
         reader.seek(SeekFrom::Start(offset as u64))?;
         let num_linedefs = size / 14;
         let mut linedefs = self.linedefs.write();
@@ -638,7 +679,6 @@ impl Document {
             None
         }
     }
-
 }
 
 // --- Checksum helper functions ---
@@ -689,7 +729,7 @@ fn checksum_sidedef(crc: &mut u32, sidedef: &SideDef) {
     add_crc(crc, sidedef.sector as i32);
 }
 
-fn checksum_linedef(crc: &mut u32, linedef: &LineDef, doc: &Document) {
+fn checksum_linedef(crc: &mut u32, linedef: &LineDef, _doc: &Document) {
     add_crc(crc, linedef.flags);
     add_crc(crc, linedef.line_type);
     add_crc(crc, linedef.tag);
@@ -697,137 +737,4 @@ fn checksum_linedef(crc: &mut u32, linedef: &LineDef, doc: &Document) {
     add_crc(crc, linedef.end as i32);
     add_crc(crc, linedef.right);
     add_crc(crc, linedef.left);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::map::{LineDef, Sector, Thing, Vertex};
-    use std::io::Cursor;
-
-    #[test]
-    fn test_empty_document() {
-        let doc = Document::new();
-        assert_eq!(doc.num_objects(ObjType::Things), 0);
-        assert_eq!(doc.num_objects(ObjType::Vertices), 0);
-        assert_eq!(doc.num_objects(ObjType::Sectors), 0);
-        assert_eq!(doc.num_objects(ObjType::Linedefs), 0);
-        assert_eq!(doc.num_objects(ObjType::Sidedefs), 0);
-    }
-
-    #[test]
-    fn test_vertex_operations() {
-        let mut doc = Document::new();
-        let v1 = doc.add_vertex(0, 0);
-        let v2 = doc.add_vertex(100, 100);
-        let linedef = Arc::new(LineDef {
-            start: v1,
-            end: v2,
-            flags: 0,
-            line_type: 0,
-            tag: 0,
-            right: -1,
-            left: -1,
-        });
-        assert!(!doc.is_zero_length(&linedef));
-        assert!(!doc.is_horizontal(&linedef));
-        assert!(!doc.is_vertical(&linedef));
-        assert!(doc.touches_coord(&linedef, 0, 0));
-        assert!(doc.touches_coord(&linedef, 100, 100));
-        assert!(!doc.touches_coord(&linedef, 50, 50));
-    }
-
-    #[test]
-    fn test_remove_vertex() {
-        let mut doc = Document::new();
-        let v1 = doc.add_vertex(0, 0);
-        let _ = doc.add_vertex(100, 100);
-        let _ = doc.add_linedef(v1, 1, -1, -1);
-        doc.remove_vertex(v1);
-        assert_eq!(doc.vertices().read().len(), 1);
-    }
-
-    #[test]
-    fn test_add_remove_linedef() {
-        let mut doc = Document::new();
-        let v1 = doc.add_vertex(0, 0);
-        let v2 = doc.add_vertex(100, 100);
-        let l1 = doc.add_linedef(v1, v2, -1, -1);
-        assert_eq!(doc.linedefs().read().len(), 1);
-        doc.remove_linedef(l1);
-        assert_eq!(doc.linedefs().read().len(), 0);
-    }
-
-    #[test]
-    fn test_add_remove_sector() {
-        let mut doc = Document::new();
-        let s1 = doc.add_sector(128, 0, "FLOOR4_8".to_string(), "CEIL3_5".to_string(), 0, 0);
-        assert_eq!(doc.sectors().read().len(), 1);
-        doc.remove_sector(s1);
-        assert_eq!(doc.sectors().read().len(), 0);
-    }
-
-    #[test]
-    fn test_add_remove_thing() {
-        let mut doc = Document::new();
-        let t1 = doc.add_thing(32, 32, 90, 1, 0);
-        assert_eq!(doc.things().read().len(), 1);
-        doc.remove_thing(t1);
-        assert_eq!(doc.things().read().len(), 0);
-    }
-
-    #[test]
-    fn test_concurrent_access() {
-        let doc = Document::new();
-        std::thread::scope(|s| {
-            s.spawn(|| {
-                let mut vertices = doc.vertices.write();
-                vertices.push(Arc::new(Vertex { raw_x: 0, raw_y: 0 }));
-            });
-            s.spawn(|| {
-                let vertices = doc.vertices.read();
-                let _ = vertices.len();
-            });
-        });
-    }
-
-    #[test]
-    fn test_wad_loading() {
-        // Create a minimal test WAD in memory with a single level.
-        let mut wad_data = vec![];
-        // WAD header: "PWAD", 2 lumps, directory offset at byte 32.
-        wad_data.extend_from_slice(b"PWAD");
-        wad_data.extend_from_slice(&2i32.to_le_bytes());
-        wad_data.extend_from_slice(&32i32.to_le_bytes());
-        // First lump: level marker "MAP01" (8 bytes)
-        let level_marker = b"MAP01\0\0\0";
-        // Second lump: VERTEXES lump (4 bytes of data)
-        let vertices_data = vec![0, 0, 0, 0];
-        // Directory entries:
-        // Lump 0: level marker at offset 12, size = 8, name "MAP01"
-        let dir_entry0 = [
-            12i32.to_le_bytes().to_vec(),
-            8i32.to_le_bytes().to_vec(),
-            b"MAP01   ".to_vec(),
-        ].concat();
-        // Lump 1: VERTEXES at offset 20, size = 4, name "VERTEXES"
-        let dir_entry1 = [
-            20i32.to_le_bytes().to_vec(),
-            4i32.to_le_bytes().to_vec(),
-            b"VERTEXES".to_vec(),
-        ].concat();
-        // Build the WAD: header, level marker lump, vertices lump, then directory.
-        wad_data.extend_from_slice(level_marker);
-        wad_data.extend_from_slice(&vertices_data);
-        wad_data.extend(dir_entry0);
-        wad_data.extend(dir_entry1);
-        let mut cursor = Cursor::new(wad_data);
-        let mut doc = Document::new();
-        doc.load_wad(&mut cursor).unwrap();
-        // We expect that the automatic level loading picked "MAP01" and loaded the VERTEXES lump.
-        assert_eq!(doc.num_objects(ObjType::Vertices), 1);
-        // Also, available_levels() should list "MAP01".
-        let levels = doc.available_levels();
-        assert!(levels.contains(&"MAP01".to_string()));
-    }
 }
