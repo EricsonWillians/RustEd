@@ -54,76 +54,69 @@ RustEd is designed to be:
 The project is organized into several core directories, each responsible for a distinct aspect of RustEd’s functionality:
 
 ```
-RustEd/
-├── Cargo.toml                # Project configuration and dependencies
-├── build.rs                  # Build script for resource embedding (optional)
-├── LICENSE                   # Project license
-├── README.md                 # Project documentation (this file)
-├── resources/                # Assets, configuration files, etc.
-│   ├── common/
-│   ├── games/
-│   └── ports/
-├── setup_project.sh          # Script to set up the project structure
-├── src/
-│   ├── bsp/                  # Level geometry, BSP, and blockmap generation
-│   │   ├── bsp_level.rs
-│   │   ├── bsp_node.rs
-│   │   ├── bsp_util.rs
-│   │   └── mod.rs
-│   ├── document/             # Level data structures and file parsing
-│   │   ├── dehconsts.rs
-│   │   ├── document_module.rs
-│   │   ├── document.rs
-│   │   └── mod.rs
-│   ├── editor/               # Core editor logic and commands
-│   │   ├── commands.rs
-│   │   ├── cutpaste.rs
-│   │   ├── generator.rs
-│   │   ├── hover.rs
-│   │   ├── linedef.rs
-│   │   ├── mod.rs
-│   │   ├── objects.rs
-│   │   ├── sector.rs
-│   │   ├── things.rs
-│   │   └── vertex.rs
-│   ├── lib.rs                # Library entry point; re-exports modules
-│   ├── main.rs               # Main application entry point (UI/egui integration)
-│   ├── platform/             # Platform-specific code (e.g., Windows, X11)
-│   │   ├── mod.rs
-│   │   ├── win.rs
-│   │   └── x11.rs
-│   ├── ui/                   # User interface code (menus, dialogs, panels)
-│   │   ├── about.rs
-│   │   ├── browser.rs
-│   │   ├── canvas.rs
-│   │   ├── dialog.rs
-│   │   ├── editor_ui.rs
-│   │   ├── file.rs
-│   │   ├── hyper.rs
-│   │   ├── infobar.rs
-│   │   ├── linedef_ui.rs
-│   │   ├── menu.rs
-│   │   ├── misc.rs
-│   │   ├── mod.rs
-│   │   ├── nombre.rs
-│   │   ├── panelinput.rs
-│   │   ├── pic.rs
-│   │   ├── prefs.rs
-│   │   ├── replace.rs
-│   │   ├── scroll.rs
-│   │   ├── sector_ui.rs
-│   │   ├── sidedef.rs
-│   │   ├── thing_ui.rs
-│   │   ├── tile.rs
-│   │   ├── vertex_ui.rs
-│   │   └── main_window.rs   # Main UI module using egui/eframe
-│   └── utils/                # Utility functions and helper modules
-│       ├── adler.rs
-│       ├── file.rs
-│       ├── mod.rs
-│       ├── tga.rs
-│       └── util.rs
-└── tests/                    # Integration and unit tests for the project
+RustEd
+├── build.rs
+├── LICENSE
+├── PROCEDURAL.md
+├── README.md
+├── resources
+│   ├── common
+│   ├── games
+│   └── ports
+├── setup_project.sh
+├── src
+│   ├── bsp
+│   │   ├── bsp_level.rs
+│   │   ├── bsp_node.rs
+│   │   ├── bsp_procedural.rs
+│   │   ├── bsp_util.rs
+│   │   ├── debug_viz.rs
+│   │   └── mod.rs
+│   ├── document
+│   │   ├── dehconsts.rs
+│   │   ├── document.rs
+│   │   └── mod.rs
+│   ├── editor
+│   │   ├── commands.rs
+│   │   ├── core.rs
+│   │   ├── cutpaste.rs
+│   │   ├── generator.rs
+│   │   ├── hover.rs
+│   │   ├── instance.rs
+│   │   ├── mod.rs
+│   │   └── objects.rs
+│   ├── lib.rs
+│   ├── main.rs
+│   ├── map
+│   │   ├── linedef.rs
+│   │   ├── mod.rs
+│   │   ├── sector.rs
+│   │   ├── sidedef.rs
+│   │   ├── thing.rs
+│   │   └── vertex.rs
+│   ├── platform
+│   │   ├── mod.rs
+│   │   ├── win.rs
+│   │   └── x11.rs
+│   ├── ui
+│   │   ├── central_panel.rs
+│   │   ├── dialog.rs
+│   │   ├── file.rs
+│   │   ├── main_window.rs
+│   │   ├── menu.rs
+│   │   ├── mod.rs
+│   │   ├── side_panel.rs
+│   │   ├── status_bar.rs
+│   │   ├── theme.rs
+│   │   └── tool_window_manager.rs
+│   └── utils
+│       ├── adler.rs
+│       ├── file.rs
+│       ├── geometry.rs
+│       ├── mod.rs
+│       ├── tga.rs
+│       └── util.rs
+└── tests
     ├── bsp_tests.rs
     └── mod.rs
 ```

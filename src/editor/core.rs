@@ -1,9 +1,11 @@
 // src/editor/editor.rs
 
 use std::fs::File;
+use std::io::Cursor;
 use std::sync::Arc;
+
+use log::{error, info};
 use parking_lot::RwLock;
-use log::error;
 use rfd::FileDialog;
 
 use crate::bsp::BspLevel;
@@ -11,11 +13,12 @@ use crate::document::Document;
 use crate::editor::commands::{Command, CommandType};
 use crate::ui::central_panel::CentralPanel;
 
+/// Tools for the editor, e.g. Select, DrawLine, etc.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Tool {
     Select,
     DrawLine,
-    DrawShape, // For drawing rectangular sectors
+    DrawShape,
     EditThings,
     EditSectors,
 }
@@ -32,6 +35,7 @@ impl Tool {
     }
 }
 
+/// A simplified selection enum with cloned data (not Arc<>).
 #[derive(Clone, Debug)]
 pub enum Selection {
     Vertex(crate::map::Vertex),
@@ -41,24 +45,35 @@ pub enum Selection {
     None,
 }
 
+/// The core `Editor` struct, holding geometry references, current tool, etc.
 pub struct Editor {
+    /// The current document, if any.
     document: Option<Arc<RwLock<Document>>>,
+
+    /// Which tool is active.
     current_tool: Tool,
+
+    /// Undo/redo stacks of commands.
     command_history: Vec<Box<dyn Command>>,
     redo_stack: Vec<Box<dyn Command>>,
+
+    /// Messages or status for UI.
     pub status_message: String,
     pub error_message: Option<String>,
+
+    /// Whether the side panel or BSP debug is shown.
     pub show_side_panel: bool,
     pub show_bsp_debug: bool,
 
-    /// A handle to the central panel for view/pan/zoom, if needed
+    /// A handle to the central panel (camera, pan/zoom) if needed.
     central_panel: Option<Arc<RwLock<CentralPanel>>>,
 
-    /// Where we store the BSP once built (instead of storing it in Document).
+    /// We store a built BSP here (instead of the Document).
     bsp_level: Option<Arc<BspLevel>>,
 }
 
 impl Editor {
+    /// Create an editor with the given Document.
     pub fn new(document: Arc<RwLock<Document>>) -> Self {
         Self {
             document: Some(document),
@@ -74,27 +89,34 @@ impl Editor {
         }
     }
 
+    /// Attach a central panel for pan/zoom usage.
     pub fn attach_central_panel(&mut self, central_panel: Arc<RwLock<CentralPanel>>) {
         self.central_panel = Some(central_panel);
     }
 
+    /// Returns the Document arc if any.
     pub fn document(&self) -> Option<Arc<RwLock<Document>>> {
         self.document.clone()
     }
 
+    /// Sets a new Document, discarding the old one.
     pub fn set_document(&mut self, document: Arc<RwLock<Document>>) {
         self.document = Some(document);
+        self.error_message = None;
     }
 
+    /// Returns the current tool.
     pub fn current_tool(&self) -> Tool {
         self.current_tool
     }
 
+    /// Sets the current tool and logs a status message.
     pub fn set_current_tool(&mut self, tool: Tool) {
         self.current_tool = tool;
         self.status_message = format!("Selected tool: {}", tool.name());
     }
 
+    /// Returns a list of all available tools.
     pub fn available_tools(&self) -> Vec<Tool> {
         vec![
             Tool::Select,
@@ -105,67 +127,82 @@ impl Editor {
         ]
     }
 
+    /// A minimal way to get a selected object (always returns the first vertex, if any).
+    /// Real logic is needed for real selection code.
     pub fn selected_object(&self) -> Selection {
-        if let Some(doc) = &self.document {
-            let doc = doc.read();
-            let vertices = doc.vertices.read();
-            if let Some(vertex) = vertices.first() {
-                return Selection::Vertex((**vertex).clone());
+        if let Some(doc_arc) = &self.document {
+            let doc = doc_arc.read();
+            let verts = doc.vertices.read();
+            if let Some(first_v) = verts.first() {
+                return Selection::Vertex((**first_v).clone());
             }
         }
         Selection::None
     }
 
+    /// Execute a command, handle errors, and reset redo stack on success.
     pub fn execute_command(&mut self, command: Box<dyn Command>) {
-        if let Some(doc) = &self.document {
-            let mut doc = doc.write();
-            if let Err(err) = command.execute(&mut doc) {
-                self.error_message = Some(format!("Error executing command: {}", err));
-            } else {
-                self.command_history.push(command);
-                self.redo_stack.clear(); // Clear redo stack after a new command.
+        if let Some(doc_arc) = &self.document {
+            let mut doc = doc_arc.write();
+            match command.execute(&mut doc) {
+                Ok(_) => {
+                    self.command_history.push(command);
+                    self.redo_stack.clear();
+                }
+                Err(err) => {
+                    self.error_message = Some(format!("Error executing command: {}", err));
+                }
             }
+        } else {
+            self.error_message = Some("No document to execute command on.".to_string());
         }
     }
 
+    /// Undo the last command, if any.
     pub fn undo(&mut self) {
-        if let Some(mut command) = self.command_history.pop() {
-            if let Some(doc) = &self.document {
-                let mut doc = doc.write();
-                if let Err(err) = command.unexecute(&mut doc) {
+        if let Some(mut cmd) = self.command_history.pop() {
+            if let Some(doc_arc) = &self.document {
+                let mut doc = doc_arc.write();
+                if let Err(err) = cmd.unexecute(&mut doc) {
                     self.error_message = Some(format!("Error undoing command: {}", err));
                 } else {
-                    self.redo_stack.push(command);
+                    self.redo_stack.push(cmd);
                 }
             }
         }
     }
 
+    /// Redo the last undone command, if any.
     pub fn redo(&mut self) {
-        if let Some(mut command) = self.redo_stack.pop() {
-            if let Some(doc) = &self.document {
-                let mut doc = doc.write();
-                if let Err(err) = command.execute(&mut doc) {
+        if let Some(mut cmd) = self.redo_stack.pop() {
+            if let Some(doc_arc) = &self.document {
+                let mut doc = doc_arc.write();
+                if let Err(err) = cmd.execute(&mut doc) {
                     self.error_message = Some(format!("Error redoing command: {}", err));
                 } else {
-                    self.command_history.push(command);
+                    self.command_history.push(cmd);
                 }
             }
         }
     }
 
-    // --- Document Management Methods ---
+    // ----------------- Document Management  -----------------
 
+    /// Create a brand new, empty document.
     pub fn new_document(&mut self) {
         self.document = Some(Arc::new(RwLock::new(Document::new())));
-        self.status_message = "Created new document".to_string();
         self.command_history.clear();
         self.redo_stack.clear();
+        self.status_message = "Created new document.".to_string();
+        self.error_message = None;
     }
 
+    /// A convenience wrapper for saving, logs on error.
     pub fn save_document_wrapper(&mut self) {
         match self.save_document() {
-            Ok(_) => self.status_message = "Document saved".to_string(),
+            Ok(_) => {
+                self.status_message = "Document saved.".to_string();
+            }
             Err(e) => {
                 error!("Failed to save document: {}", e);
                 self.error_message = Some(format!("Failed to save: {}", e));
@@ -173,18 +210,19 @@ impl Editor {
         }
     }
 
+    /// Actually saves the document (placeholder).
     pub fn save_document(&self) -> Result<(), String> {
         if let Some(doc_arc) = &self.document {
             let _doc = doc_arc.read();
-            // Implement actual WAD saving logic
-            println!("Document saved (placeholder).");
+            // Real logic needed here
+            info!("(Placeholder) Document saved.");
             Ok(())
         } else {
-            Err("No document to save".to_string())
+            Err("No document available to save.".into())
         }
     }
 
-    /// Opens a native file dialog to choose a WAD file, loads it, and updates the document.
+    /// Opens a file dialog to pick a WAD, and loads it, replacing the doc if successful.
     pub fn show_open_dialog(&mut self) {
         if let Some(path) = FileDialog::new().add_filter("WAD Files", &["wad"]).pick_file() {
             let path_str = path.to_string_lossy().to_string();
@@ -192,129 +230,152 @@ impl Editor {
                 Ok(mut file) => {
                     let mut new_doc = Document::new();
                     if let Err(e) = new_doc.load_wad(&mut file) {
-                        self.error_message = Some(format!("Failed to load WAD: {}", e));
                         error!("WAD load error: {}", e);
+                        self.error_message = Some(format!("Failed to load WAD: {}", e));
                     } else {
                         self.document = Some(Arc::new(RwLock::new(new_doc)));
+                        self.command_history.clear();
+                        self.redo_stack.clear();
                         self.status_message = format!("Loaded WAD file: {}", path_str);
+                        self.error_message = None;
                     }
                 }
                 Err(e) => {
-                    self.error_message = Some(format!("Failed to open file {}: {}", path_str, e));
                     error!("File open error: {}", e);
+                    self.error_message = Some(format!("Failed to open file {}: {}", path_str, e));
                 }
             }
         }
     }
 
-    /// Wraps building the BSP so we can handle errors gracefully.
+    /// Build the BSP, sets show_bsp_debug to true if successful.
     pub fn build_nodes_wrapper(&mut self) {
         match self.build_nodes() {
             Ok(_) => {
-                self.status_message = "BSP nodes built successfully".to_string();
+                self.status_message = "BSP built successfully.".to_string();
                 self.show_bsp_debug = true;
             }
             Err(e) => {
-                error!("Failed to build nodes: {}", e);
-                self.error_message = Some(format!("Node building failed: {}", e));
+                error!("BSP build error: {}", e);
+                self.error_message = Some(format!("BSP build error: {}", e));
             }
         }
     }
 
-    /// Actually builds the BSP, storing it in this Editor.
+    /// Actually create the BspLevel from the doc, store in self.bsp_level.
     pub fn build_nodes(&mut self) -> Result<(), String> {
-        if let Some(doc_arc) = &self.document {
-            let bsp_level = BspLevel::new(doc_arc.clone());
-            bsp_level.build()?; // If error, short-circuits
+        let doc_arc = match &self.document {
+            Some(arc) => arc,
+            None => return Err("No document loaded!".into()),
+        };
 
-            // Store in the editor
-            self.bsp_level = Some(Arc::new(bsp_level));
-
-            Ok(())
-        } else {
-            Err("No document loaded".to_string())
-        }
+        let bsp = BspLevel::new(doc_arc.clone());
+        bsp.build()?; // short-circuits on error
+        self.bsp_level = Some(Arc::new(bsp));
+        Ok(())
     }
 
+    /// Example placeholder for test map creation.
     pub fn generate_test_map(&mut self) {
-        if let Some(_doc_arc) = &self.document {
-            // let mut _doc = doc_arc.write();
-            // Possibly call some doc-level generator. For now, no-op:
-            self.status_message = "Generated test map (placeholder)".to_string();
-        } else {
-            self.error_message = Some("No document loaded".to_string());
+        if self.document.is_none() {
+            self.error_message = Some("No document loaded.".to_string());
+            return;
         }
+        // Real logic needed
+        self.status_message = "Generated test map (placeholder).".into();
     }
 
+    /// Cancels the current operation, e.g. if user was drawing lines.
     pub fn cancel_current_operation(&mut self) {
         self.current_tool = Tool::Select;
+        // You could also clear selection or partial geometry if needed
+        // self.clear_selection();
+        info!("Canceled current operation. Tool reset to Select.");
     }
 
-    pub fn load_level_wrapper(&mut self, level: String) {
-        if let Some(doc_arc) = &self.document {
-            let wad_data_opt = {
-                let doc = doc_arc.read();
-                {
-                    let wad_data = doc.wad_data.read();
-                    wad_data.clone()
-                }
-            };
+    /// Loads a map level from the current WAD data, with improved lock management
+    /// and error handling. Re-centers the view on successful load.
+    pub fn load_level_wrapper(&mut self, level: String) -> Result<(), String> {
+        // Early return if no document is present
+        let doc_arc = self.document.as_ref()
+            .ok_or_else(|| "No document present".to_string())?;
 
-            if let Some(wad_data) = wad_data_opt {
-                let mut cursor = std::io::Cursor::new(wad_data);
-                match doc_arc.write().load_level(&level, &mut cursor) {
-                    Ok(_) => {
-                        self.status_message = format!("Loaded level: {}", level);
-                        // Re-center view
-                        if let Some(bbox) = doc_arc.read().bounding_box() {
-                            let center = bbox.center();
-                            if let Some(central_panel) = &self.central_panel {
-                                let mut cp = central_panel.write();
-                                let zoom = cp.get_zoom();
-                                // Hypothetical methods to safely modify these private fields:
-                                cp.set_zoom(1.0);
-                                cp.set_pan(egui::vec2(
-                                    -center.x * zoom,
-                                    -center.y * zoom,
-                                ));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        self.error_message = Some(format!("Failed to load level {}: {}", level, e));
-                        error!("Failed to load level {}: {}", level, e);
-                    }
-                }
-            } else {
-                self.error_message = Some("No WAD data stored".to_string());
-                error!("No WAD data stored");
+        // First, extract WAD data under a smaller read lock scope
+        let wad_data = {
+            let doc_read = doc_arc.read();
+            let wad_data_read = doc_read.wad_data.read();
+            wad_data_read.clone()
+                .ok_or_else(|| "No WAD data stored for the current document".to_string())?
+        }; // Locks are dropped here
+
+        // Create cursor outside of any locks
+        let mut cursor = std::io::Cursor::new(wad_data);
+
+        // Load the level data under a write lock
+        {
+            let mut doc_write = doc_arc.write();
+            doc_write.load_level(&level, &mut cursor)
+                .map_err(|e| format!("Failed to load level {}: {}", level, e))?;
+            
+            // Calculate bounding box while we still have the write lock
+            let bbox = doc_write.bounding_box();
+            
+            // Update central panel if we have both a bounding box and panel
+            if let (Some(bbox), Some(cp_arc)) = (bbox, &self.central_panel) {
+                let center = bbox.center();
+                let mut cp = cp_arc.write();
+                
+                // Update view in a deadlock-safe way
+                cp.set_zoom(1.0);
+                cp.set_pan(egui::vec2(-center.x, -center.y));
             }
+        } // Write lock is dropped here
+
+        // Update status only after successful load
+        self.status_message = format!("Loaded level: {}", level);
+        self.error_message = None;
+        
+        log::info!("Loaded level {} successfully.", level);
+        Ok(())
+    }
+
+    /// Helper method to update the view center, separated for clarity
+    /// and potential reuse
+    fn _update_view_center(&self, center: egui::Pos2) -> Result<(), String> {
+        if let Some(cp_arc) = &self.central_panel {
+            let mut cp = cp_arc.write();
+            cp.set_zoom(1.0);
+            cp.set_pan(egui::vec2(-center.x, -center.y));
+            Ok(())
+        } else {
+            Err("No central panel available".to_string())
         }
     }
 
-    /// Returns the BSP, if built.
+    /// Return the BSP if built
     pub fn bsp_level(&self) -> Option<Arc<BspLevel>> {
         self.bsp_level.clone()
     }
 
-    /// Uses the editor's central panel to convert screen coordinates to world coordinates.
+    /// Convert from screen to world coords using the central panel's pan/zoom.
     pub fn screen_to_world(&self, screen_pos: egui::Pos2) -> egui::Pos2 {
-        if let Some(central_panel) = &self.central_panel {
-            let cp = central_panel.read();
-            let zoom = cp.get_zoom(); // We assume there's a public accessor
-            let pan = cp.get_pan();   // Similarly, a public accessor
+        if let Some(cp_arc) = &self.central_panel {
+            let cp = cp_arc.read();
+            let zoom = cp.get_zoom();
+            let pan = cp.get_pan();
             return egui::pos2(
                 (screen_pos.x - pan.x) / zoom,
                 (screen_pos.y - pan.y) / zoom,
             );
         }
-        egui::Pos2::default()
+        screen_pos // fallback: no transform
     }
 
+    /// If user clicks on the central panel, handle it. For now, we just do different logic by tool.
     pub fn handle_click(&mut self, world_pos: egui::Pos2) {
         match self.current_tool {
             Tool::DrawLine => {
-                // Example: Add a vertex at the clicked position.
+                // Example command: add a vertex at the clicked position
                 let cmd = CommandType::AddVertex {
                     x: world_pos.x as i32,
                     y: world_pos.y as i32,
@@ -323,14 +384,22 @@ impl Editor {
                 self.execute_command(Box::new(cmd));
             }
             Tool::Select => {
-                // TODO: implement selection logic
+                // TODO: implement actual selection logic
             }
-            _ => {}
+            Tool::DrawShape => {
+                // e.g. draw a rectangular sector
+            }
+            Tool::EditThings => {
+                // e.g. add or move a thing
+            }
+            Tool::EditSectors => {
+                // e.g. edit sector properties
+            }
         }
     }
 
     pub fn has_unsaved_changes(&self) -> bool {
-        // Real logic goes here if you track changes
+        // Implement real logic for tracking changes
         false
     }
 }

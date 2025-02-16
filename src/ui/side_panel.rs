@@ -1,19 +1,23 @@
 // src/ui/side_panel.rs
 
 use std::sync::Arc;
-use eframe::egui::{self, Context, Ui};
+use eframe::egui::{self, Context, Ui, ScrollArea};
 use parking_lot::RwLock;
+use log::{error, info};
 
 use crate::editor::core::{Editor, Selection};
 
-/// Manages the left-side panel with tool buttons, level list, and properties.
+/// Manages the left-side panel with tool buttons, a level list, and properties of the selected object.
 pub struct SidePanel {
+    /// Reference to the main Editor
     editor: Arc<RwLock<Editor>>,
-    pub show_side_panel: bool, // Whether this panel is currently visible
+
+    /// Whether this side panel is currently visible.
+    pub show_side_panel: bool,
 }
 
 impl SidePanel {
-    /// Create a new SidePanel, by providing an `Editor`.
+    /// Creates a new side panel that references the given Editor.
     pub fn new(editor: Arc<RwLock<Editor>>) -> Self {
         Self {
             editor,
@@ -21,98 +25,128 @@ impl SidePanel {
         }
     }
 
-    /// Called each frame, updates the side panel UI if it's visible.
+    /// Called every frame. Draws the panel if `show_side_panel` is true.
     pub fn update(&mut self, ctx: &Context) {
         if !self.show_side_panel {
-            return; // Early exit if user has hidden it
+            return;
         }
 
         egui::SidePanel::left("tools_panel")
             .default_width(250.0)
             .resizable(true)
             .show(ctx, |ui| {
-                self.show_tools(ui);
-                ui.separator();
-                self.show_levels(ui);
-                ui.separator();
-                self.show_properties(ui);
+                // Put everything in a vertical scroll area
+                ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        self.show_tools(ui);
+                        ui.separator();
+                        self.show_levels(ui);
+                        ui.separator();
+                        self.show_properties(ui);
+                    });
             });
     }
 
-    /// Displays a list of available tools (from the Editor), and lets user click to select one.
+    /// Shows the tool selection (e.g., Select, DrawLine, etc.).
     fn show_tools(&self, ui: &mut Ui) {
         ui.heading("Tools");
 
-        // Acquire a read lock to see the available tools and current tool.
-        let editor = self.editor.read();
+        // Acquire a read lock on the Editor
+        let ed_read = self.editor.read();
 
-        for tool in editor.available_tools() {
-            let selected = editor.current_tool() == tool;
+        let available_tools = ed_read.available_tools();
+        let current_tool = ed_read.current_tool();
 
-            // A clickable label which becomes selected if current tool == tool
+        // Release the read lock before we mutate the editor if user clicks
+        drop(ed_read);
+
+        // Now display the tools
+        for tool in available_tools {
+            // Check if it's currently selected
+            let selected = self.editor.read().current_tool() == tool;
             if ui.selectable_label(selected, tool.name()).clicked() {
-                // Before we mutate the editor, release our read lock
-                drop(editor);
-
-                // Acquire a write lock to actually set the tool
-                self.editor.write().set_current_tool(tool);
-                return; // We must exit early, because we can't use `editor` after the drop
+                // Acquire write lock to change tool
+                let mut ed_write = self.editor.write();
+                ed_write.set_current_tool(tool);
+                return; // Early return because we can't keep using ed_write while we hold it
             }
         }
     }
 
-    /// Displays the list of levels found in the WAD, enabling user to switch levels.
-    fn show_levels(&self, ui: &mut Ui) {
+    /// Shows a list of levels from the WAD, letting the user load a different level.
+    fn show_levels(&mut self, ui: &mut Ui) {
         ui.heading("Levels");
 
-        // Acquire the editor read lock, then get the Document
-        if let Some(doc_arc) = self.editor.read().document() {
-            // Acquire doc read lock to get the available levels
-            let levels = {
-                let doc = doc_arc.read();
-                doc.available_levels()
-            };
+        // We only need to read the Editor to get the Document.
+        let ed_read = self.editor.read();
+        let doc_opt = ed_read.document();
 
-            if levels.is_empty() {
-                ui.label("No levels found. Check your WAD file.");
-            } else {
-                for level_name in levels {
-                    // A button for each level. Click to load it.
-                    let level_name_clone = level_name.clone();
-                    let doc_arc_clone = Arc::clone(&doc_arc);
-                    if ui.button(&level_name).clicked() {
-                        // Release editor read lock before mutating
-                        drop(doc_arc_clone);
-
-                        // Then call the load wrapper
-                        self.editor.write().load_level_wrapper(level_name_clone);
-                    }
-                }
-            }
-        } else {
+        if doc_opt.is_none() {
             ui.label("No document loaded.");
+            return;
+        }
+        // Get the Document Arc
+        let doc_arc = doc_opt.unwrap();
+        // Acquire the Document read lock to fetch the level list
+        let levels = {
+            let doc = doc_arc.read();
+            doc.available_levels()
+        };
+
+        if levels.is_empty() {
+            ui.label("No levels found. Check your WAD file.");
+            return;
+        }
+
+        // Release the Editor read lock before we might mutate it.
+        drop(ed_read);
+
+        // Display each level name as a button
+        for level_name in &levels {
+            if ui.button(level_name).clicked() {
+                // Acquire a write lock, in case we want to reset selection / load level
+                let mut ed_write = self.editor.write();
+
+                // Reset any ongoing selection or partial operation to avoid referencing old geometry
+                ed_write.cancel_current_operation();
+
+                info!("Attempting to load level: {}", level_name);
+
+                // Actually load the new level
+                ed_write.load_level_wrapper(level_name.clone());
+
+                // If there's an error message set by load_level_wrapper, log it
+                if let Some(ref err_msg) = ed_write.error_message {
+                    error!("Failed to load level {}: {}", level_name, err_msg);
+                }
+                // Once we're done, drop the write lock
+                return; // Possibly break out so we don't keep iterating
+            }
         }
     }
 
-    /// Shows properties for whatever the user has selected (vertex, linedef, etc.).
+    /// Shows properties of the currently selected object (vertex, linedef, etc.).
     fn show_properties(&self, ui: &mut Ui) {
         ui.heading("Properties");
 
-        // We only need a read lock to see what is selected.
+        // We just read the selection from the editor.
         let selection = self.editor.read().selected_object();
 
         match selection {
             Selection::Vertex(vertex) => {
                 ui.label(format!("Vertex: ({}, {})", vertex.x, vertex.y));
             }
-            Selection::Line(linedef) => {
-                ui.label(format!("Linedef: from vertex {} to {}", linedef.start, linedef.end));
+            Selection::Line(line_def) => {
+                ui.label(format!(
+                    "Linedef: from {} to {}",
+                    line_def.start, line_def.end
+                ));
             }
             Selection::Sector(sector) => {
                 ui.label(format!(
                     "Sector: floor {} / ceiling {}",
-                    sector.floor_height,
-                    sector.ceiling_height
+                    sector.floor_height, sector.ceiling_height
                 ));
             }
             Selection::Thing(thing) => {
