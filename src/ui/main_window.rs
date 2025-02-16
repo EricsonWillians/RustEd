@@ -216,38 +216,73 @@ impl MainWindow {
             .resizable(true)
             .show(ctx, |ui| {
                 ui.heading("Tools");
-                let editor = self.editor.read();
-                for tool in editor.available_tools() {
-                    let selected = editor.current_tool() == tool;
-                    if ui.selectable_label(selected, tool.name()).clicked() {
-                        drop(editor);
-                        self.select_tool(tool);
-                        return;
-                    }
-                }
-                ui.separator();
-                ui.heading("Levels");
-                // Display available levels from the document.
-                if let Some(doc_arc) = editor.document() {
-                    let doc = doc_arc.read();
-                    for level in doc.available_levels() {
-                        if ui.button(&level).clicked() {
-                            // Here you might reload the level.
-                            // Note: You need access to the original file or in-memory data.
-                            // For this example, we assume that a level is already loaded.
-                            // You could implement a proper reload mechanism as needed.
-                            // For now, we simply update the status message.
-                            self.status_message = format!("Selected level: {}", level);
+                {
+                    let editor = self.editor.read();
+                    for tool in editor.available_tools() {
+                        let selected = editor.current_tool() == tool;
+                        if ui.selectable_label(selected, tool.name()).clicked() {
+                            drop(editor);
+                            self.select_tool(tool);
+                            return;
                         }
                     }
                 }
                 ui.separator();
+                ui.heading("Levels");
+    
+                // Retrieve available levels inside its own scope.
+                let levels: Vec<String> = {
+                    if let Some(doc_arc) = self.editor.read().document() {
+                        let doc = doc_arc.read();
+                        let levels = doc.available_levels();
+                        info!("Detected levels: {:?}", levels);
+                        levels
+                    } else {
+                        Vec::new()
+                    }
+                };
+    
+                if levels.is_empty() {
+                    ui.label("No levels found. Check your WAD file.");
+                } else {
+                    for level in &levels {
+                        ui.horizontal(|ui| {
+                            if ui.button(level).clicked() {
+                                info!("Reloading level: {}", level);
+                                if let Some(doc_arc) = self.editor.read().document() {
+                                    // Create a new cursor over the stored WAD data.
+                                    let wad_data_opt = { self.editor.read().document().unwrap().read().wad_data.read().clone() };
+                                    if let Some(wad_data) = wad_data_opt {
+                                        let mut cursor = std::io::Cursor::new(wad_data);
+                                        // Acquire a write lock to load the level.
+                                        match doc_arc.write().load_level(level, &mut cursor) {
+                                            Ok(_) => {
+                                                self.status_message = format!("Loaded level: {}", level);
+                                                info!("Successfully loaded level: {}", level);
+                                            }
+                                            Err(e) => {
+                                                self.error_message = Some(format!("Failed to load level {}: {}", level, e));
+                                                error!("Failed to load level {}: {}", level, e);
+                                            }
+                                        }
+                                    } else {
+                                        self.error_message = Some("No WAD data stored".to_string());
+                                        error!("No WAD data stored");
+                                    }
+                                } else {
+                                    self.error_message = Some("No document loaded".to_string());
+                                    error!("No document loaded");
+                                }
+                            }
+                        });
+                    }
+                }
+                ui.separator();
                 ui.heading("Properties");
-                let selection = editor.selected_object();
-                drop(editor);
+                let selection = self.editor.read().selected_object();
                 self.show_property_editor(ui, &selection);
             });
-    }
+    }    
 
     // ------------------------------------------------------------------------
     // Central Area (Map Canvas with Pan/Zoom)

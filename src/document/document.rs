@@ -3,7 +3,7 @@
 use crate::map::{LineDef, Sector, SideDef, Thing, Vertex};
 use parking_lot::RwLock;
 use rayon::prelude::*;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Cursor};
 use std::str;
 use std::sync::Arc;
 use byteorder::{LE, ReadBytesExt};
@@ -56,10 +56,10 @@ pub struct Document {
 
     pub checksum: Arc<RwLock<u32>>,
 
-    // New: WAD directory and level grouping.
     pub directory: Arc<RwLock<Vec<LumpEntry>>>,
     pub levels: Arc<RwLock<Vec<LevelInfo>>>,
     pub selected_level: Arc<RwLock<Option<String>>>,
+    pub wad_data: Arc<RwLock<Option<Vec<u8>>>>,
 }
 
 const FILELUMP_SIZE: usize = 16; // 4 bytes (filepos) + 4 bytes (size) + 8 bytes (name)
@@ -81,6 +81,7 @@ impl Document {
             directory: Arc::new(RwLock::new(Vec::new())),
             levels: Arc::new(RwLock::new(Vec::new())),
             selected_level: Arc::new(RwLock::new(None)),
+            wad_data: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -319,11 +320,15 @@ impl Document {
     }
 
     pub fn clear(&mut self) {
-        self.clear_geometry();
+        self.things.write().clear();
+        self.vertices.write().clear();
+        self.sectors.write().clear();
+        self.sidedefs.write().clear();
+        self.linedefs.write().clear();
         self.header_data.write().clear();
-        self.directory.write().clear();
-        self.levels.write().clear();
-        self.selected_level.write().take();
+        self.behavior_data.write().clear();
+        self.scripts_data.write().clear();
+        *self.checksum.write() = 0;
     }
 
     /// Returns true if the linedef is horizontal.
@@ -367,8 +372,9 @@ impl Document {
     // --- WAD Loading and Level Selection ---
 
     /// Loads a WAD file from the given reader.
-    /// Reads the header and directory, groups lumps into levels,
-    /// and automatically loads the first level (if available).
+    /// In addition to reading header and directory and grouping levels,
+    /// this function reads the entire file into memory (wad_data) so that
+    /// levels can be reloaded on demand.
     pub fn load_wad<R: Read + Seek>(&mut self, reader: &mut R) -> io::Result<()> {
         self.clear();
         self.clear_geometry();
@@ -377,9 +383,16 @@ impl Document {
         let total_size = reader.seek(SeekFrom::End(0))?;
         reader.seek(SeekFrom::Start(0))?;
 
+        // Read entire file into memory.
+        let mut full_data = Vec::with_capacity(total_size as usize);
+        reader.read_to_end(&mut full_data)?;
+        *self.wad_data.write() = Some(full_data.clone());
+        // Create a new cursor over the full data.
+        let mut cursor = Cursor::new(full_data);
+
         // --- Read Header ---
         let mut header_buf = [0u8; 12];
-        reader.read_exact(&mut header_buf)?;
+        cursor.read_exact(&mut header_buf)?;
         let ident = &header_buf[0..4];
         if ident != b"IWAD" && ident != b"PWAD" {
             return Err(io::Error::new(io::ErrorKind::InvalidData,
@@ -394,15 +407,15 @@ impl Document {
 
         // --- Read Directory ---
         let dir_size = (num_lumps as usize) * FILELUMP_SIZE;
-        reader.seek(SeekFrom::Start(infotableofs as u64))?;
+        cursor.seek(SeekFrom::Start(infotableofs as u64))?;
         let mut dir_buf = vec![0u8; dir_size];
-        reader.read_exact(&mut dir_buf)?;
+        cursor.read_exact(&mut dir_buf)?;
         let mut directory = Vec::with_capacity(num_lumps as usize);
         for i in 0..(num_lumps as usize) {
             let offset = i * FILELUMP_SIZE;
-            let lump_offset = (&dir_buf[offset..offset + 4]).read_i32::<LE>()?;
-            let lump_size = (&dir_buf[offset + 4..offset + 8]).read_i32::<LE>()?;
-            let name_bytes = &dir_buf[offset + 8..offset + 16];
+            let lump_offset = (&dir_buf[offset..offset+4]).read_i32::<LE>()?;
+            let lump_size = (&dir_buf[offset+4..offset+8]).read_i32::<LE>()?;
+            let name_bytes = &dir_buf[offset+8..offset+16];
             let lump_name = str::from_utf8(name_bytes).unwrap_or("").trim_end_matches('\0').to_string();
             if lump_offset < 0 || lump_size < 0 ||
                (lump_offset as u64) > total_size ||
@@ -421,18 +434,21 @@ impl Document {
 
         // --- Automatically load the first level (if available) ---
         let first_level_name = {
-            let levels_read = self.levels.read();
-            levels_read.get(0).map(|lvl| lvl.name.clone())
+            let levels = self.levels.read();
+            levels.get(0).map(|lvl| lvl.name.clone())
         };
         if let Some(level_name) = first_level_name {
-            self.load_level(&level_name, reader)?;
+            let wad_data_clone = {
+                let wad = self.wad_data.read();
+                wad.as_ref().unwrap().clone()
+            };
+            self.load_level(&level_name, &mut Cursor::new(wad_data_clone))?;
             *self.selected_level.write() = Some(level_name);
         }
-
         Ok(())
     }
 
-    /// Groups directory entries into levels based on level markers (e.g. "MAP01" or "E1M1").
+    /// Groups lumps from the directory into levels based on markers (e.g. "MAP01" or "E1M1").
     fn group_levels(directory: &Vec<LumpEntry>) -> Vec<LevelInfo> {
         let mut levels = Vec::new();
         let mut current_level: Option<LevelInfo> = None;

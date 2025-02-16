@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Launch eframe with our RustEdApp.
     eframe::run_native(
-        "RustEd Editor",
+        "RustEd",
         native_options,
         Box::new(|_cc| Box::new(RustEdApp::new())),
     );
