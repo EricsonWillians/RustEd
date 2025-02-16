@@ -18,7 +18,6 @@ pub mod prefs;
 pub mod replace;
 pub mod scroll;
 pub mod sector_ui;
-pub mod sidedef;
 pub mod theme;
 pub mod thing_ui;
 pub mod tile;

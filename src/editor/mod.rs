@@ -84,6 +84,15 @@ impl Editor {
         self.current_tool
     }
 
+    pub fn set_document(&mut self, doc: Arc<RwLock<Document>>) {
+        self.document = Some(doc);
+    }
+
+    pub fn new_document(&mut self) {
+        self.document = Some(Arc::new(RwLock::new(Document::new())));
+        self.bsp_level = None; // Reset the BSP level
+    }
+
     pub fn set_current_tool(&mut self, tool: Tool) {
         self.current_tool = tool;
         info!("Current tool set to: {:?}", self.current_tool);

@@ -9,8 +9,6 @@ repository = "https://github.com/ericsonwillians/RustEd"
 documentation = "https://docs.rs/rusted"
 keywords = ["doom", "editor", "procedural-generation", "concurrency", "rayon", "egui"]
 categories = ["game-tools", "graphics"]
-
-# Optional build script for resource embedding or compile-time tasks.
 build = "build.rs"
 
 [dependencies]
@@ -30,39 +28,35 @@ rayon = "1.6"
 log = "0.4"
 env_logger = "0.9"
 
-# Serialization (for config, assets, etc.)
+# Serialization & JSON support
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Image processing and binary I/O support (if needed)
+# Image processing and binary I/O support
 image = "0.24"
 byteorder = "1.4"
 thiserror = "2.0.11"
+rfd = "0.15.2"
+
+# Async utilities
+futures-lite = "2.6.0"
+futures-util = { version = "0.3.31", features = ["io"] }
 
 [build-dependencies]
-# Example: use include_dir to embed resources at compile time.
 include_dir = "0.7"
 
 [dev-dependencies]
-# Testing and benchmarking utilities.
 assert_approx_eq = "1.1"
 
 [features]
-# Define conditional compilation features.
 default = ["gui"]
 gui = []
 headless = []
 
 [profile.release]
-# Optimize for maximum performance.
 opt-level = 3
 lto = true
 codegen-units = 1
 
 [profile.dev]
-# Faster compile times for development.
 opt-level = 1
-
-[package.metadata]
-# Additional metadata can be added here.
-# For example, configuration for documentation or CI integration.
