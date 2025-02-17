@@ -84,7 +84,14 @@ RustEd
 │   │   ├── hover.rs
 │   │   ├── instance.rs
 │   │   ├── mod.rs
-│   │   └── objects.rs
+│   │   ├── objects.rs
+│   │   └── tools
+│   │       ├── draw.rs
+│   │       ├── mod.rs
+│   │       ├── sectors.rs
+│   │       ├── select.rs
+│   │       ├── shape.rs
+│   │       └── things.rs
 │   ├── lib.rs
 │   ├── main.rs
 │   ├── map
